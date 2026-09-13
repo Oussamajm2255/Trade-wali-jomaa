@@ -1,0 +1,7 @@
+# Live execution dependencies (MT5 / IC Markets / FTMO).
+# Install in addition to requirements.txt:
+#   pip install -r requirements.txt -r requirements-live.txt
+#
+# Requires a locally installed MetaTrader 5 terminal, logged into your
+# broker account, with "Algo Trading" enabled (Tools -> Options).
+MetaTrader5>=5.0.45

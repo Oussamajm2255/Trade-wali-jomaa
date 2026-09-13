@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+
+# Local databases
+*.db
+*.sqlite3
+
+# Private / generated artifacts
+conversation.txt
+report.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
