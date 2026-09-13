@@ -20,13 +20,15 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from trading_agent.agents.orchestrator import Orchestrator
+from trading_agent.agents.base import LLMClient
+from trading_agent.agents.orchestrator import Orchestrator, llm_degraded
 from trading_agent.config import Settings, get_settings
 from trading_agent.data.gold import GoldData, GoldDataError
 from trading_agent.data.market import MarketData, MarketDataError
@@ -407,6 +409,9 @@ def cmd_loop(args: argparse.Namespace) -> None:
     sleep_banner_shown = False
     mode_label = "LIVE (MT5)" if settings.live_mode else "Paper"
     notifier = TelegramNotifier(settings)
+    balance_client = LLMClient(settings)
+    last_balance_day: str | None = None
+    last_degraded_day: str | None = None
     mt5_source = broker if settings.live_mode else None
     if settings.live_mode:
         try:
@@ -434,6 +439,22 @@ def cmd_loop(args: argparse.Namespace) -> None:
         )
     while True:
         try:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+            # Daily DeepSeek balance check: alert before the balance hits
+            # zero and every signal silently degrades to heuristics.
+            if notifier.enabled and last_balance_day != today:
+                last_balance_day = today
+                balance = balance_client.balance_usd() if balance_client.enabled else None
+                if balance is not None and balance < settings.deepseek_balance_warn_usd:
+                    msg = (
+                        f"Solde DeepSeek faible : {balance:.2f} USD (seuil "
+                        f"{settings.deepseek_balance_warn_usd:.2f}). Rechargez sur "
+                        "platform.deepseek.com — sans solde, le robot bascule en mode dégradé."
+                    )
+                    console.print(f"[bold yellow]{msg}[/]")
+                    notifier.send_alert(msg)
+
             for symbol in symbols:
                 market = markets.setdefault(symbol, _market_for(settings, symbol, mt5_source))
                 orchestrator = orchestrators.setdefault(
@@ -497,7 +518,21 @@ def cmd_loop(args: argparse.Namespace) -> None:
                 if seen.get(symbol) == last_ts:
                     continue  # no new closed candle yet
                 seen[symbol] = last_ts
-                result = orchestrator.run(symbol, timeframe)
+                result, verdicts, snapshot, gauge = orchestrator.run_full(symbol, timeframe)
+
+                # Degraded-mode alert: all agents fell back to heuristics
+                # (LLM unreachable, e.g. empty balance). Once per UTC day.
+                if (not verdicts or llm_degraded(verdicts)) and last_degraded_day != today:
+                    last_degraded_day = today
+                    msg = (
+                        "Mode dégradé : DeepSeek injoignable (solde vide ?) — les signaux "
+                        "utilisent les heuristiques locales, moins fines. Rechargez sur "
+                        "platform.deepseek.com."
+                    )
+                    console.print(f"[bold yellow]{msg}[/]")
+                    if notifier.enabled:
+                        notifier.send_alert(msg)
+
                 if isinstance(result, Rejection):
                     console.print(f"[dim]{symbol}: no trade — {result.reason}[/]")
                     continue
@@ -510,7 +545,6 @@ def cmd_loop(args: argparse.Namespace) -> None:
                     f"  approve: [green]python -m trading_agent.main approve {proposal_id}[/]"
                 )
                 if notifier.enabled:
-                    gauge = market.sentiment_gauge() if hasattr(market, "sentiment_gauge") else None
                     notifier.send_signal(result, gauge)
             time.sleep(args.interval)
         except KeyboardInterrupt:

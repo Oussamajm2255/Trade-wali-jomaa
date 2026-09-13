@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     # datacenter IPs (Railway), so Kraken takes over automatically there.
     paxg_exchanges: list[str] = ["binance", "kraken", "okx"]
 
+    # --- DeepSeek balance monitoring ---
+    # Checked once per UTC day; a Telegram alert is sent when the USD
+    # balance falls below this threshold (0 balance = degraded mode).
+    deepseek_balance_warn_usd: float = 1.0
+
     # --- Risk (paper) ---
     paper_starting_equity: float = 10_000.0
     risk_per_trade: float = 0.01

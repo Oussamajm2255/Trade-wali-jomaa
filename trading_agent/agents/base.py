@@ -80,3 +80,31 @@ class LLMClient:
         except (AgentError, ValidationError, json.JSONDecodeError) as exc:
             logger.warning("LLM output invalid (%s); using fallback", exc)
             return None, True
+
+    def balance_usd(self) -> float | None:
+        """Current DeepSeek account balance in USD, or None if unreachable.
+
+        Used for monitoring: an empty balance makes every analysis degrade
+        to heuristics silently — better to alert before that happens.
+        """
+        import httpx
+
+        url = f"{self.settings.deepseek_base_url.rstrip('/')}/user/balance"
+        try:
+            resp = httpx.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.settings.deepseek_api_key.get_secret_value()}"
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            if resp.status_code != 200 or not data.get("is_available"):
+                return None
+            usd = [b for b in data.get("balance_infos", []) if b.get("currency") == "USD"]
+            if not usd:
+                return None
+            return float(usd[0]["total_balance"])
+        except Exception as exc:  # noqa: BLE001 - monitoring must never raise
+            logger.warning("DeepSeek balance check failed: %s", exc)
+            return None

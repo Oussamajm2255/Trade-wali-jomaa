@@ -26,6 +26,12 @@ from trading_agent.schema.types import (
 logger = logging.getLogger(__name__)
 
 
+def llm_degraded(verdicts: dict[str, AgentVerdict]) -> bool:
+    """True when every available verdict came from the heuristic fallback
+    (LLM unreachable — e.g. empty DeepSeek balance)."""
+    return bool(verdicts) and all(v.source == "fallback" for v in verdicts.values())
+
+
 class Orchestrator:
     def __init__(self, settings: Settings, market: MarketData, risk: RiskEngine) -> None:
         self.settings = settings
