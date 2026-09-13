@@ -85,7 +85,12 @@ def _market_for(settings: Settings, symbol: str, mt5=None):
     (24/7) to the gold provider.
     """
     if symbol.upper() in GOLD_SYMBOLS:
-        return GoldData(settings.exchange_id, mt5=mt5, dxy_symbol=settings.mt5_dxy_symbol)
+        return GoldData(
+            settings.exchange_id,
+            mt5=mt5,
+            dxy_symbol=settings.mt5_dxy_symbol,
+            exchange_ids=settings.paxg_exchanges,
+        )
     return MarketData(settings.exchange_id)
 
 

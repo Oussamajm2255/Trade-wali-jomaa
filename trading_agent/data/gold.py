@@ -41,13 +41,19 @@ class GoldData:
         exchange_id: str = "binance",
         mt5: Any = None,
         dxy_symbol: str = "DXY_U6",
+        exchange_ids: list[str] | None = None,
     ) -> None:
         self.exchange_id = exchange_id
+        # PAXG fallback tries these exchanges in order until one answers
+        # (e.g. Binance blocks US datacenter IPs — Railway — so Kraken
+        # takes over automatically).
+        self.exchange_ids = exchange_ids or [exchange_id]
         self.mt5 = mt5  # optional MT5 broker for broker-native DXY candles
         self.dxy_symbol = dxy_symbol
         self._cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
         self._lock = threading.Lock()
         self._ccxt_client = None
+        self._ccxt_exchange: str | None = None
         self.last_source: str = "unknown"
 
     # ------------------------------------------------------------- yfinance
@@ -91,17 +97,40 @@ class GoldData:
 
     # ------------------------------------------------------------ PAXG fallback
 
-    def _paxg_fetch(self, timeframe: str, limit: int) -> pd.DataFrame:
+    def _paxg_client(self, exclude: str | None = None):
+        """First reachable ccxt client across the configured exchanges."""
         import ccxt
 
-        if self._ccxt_client is None:
-            client = getattr(ccxt, self.exchange_id)({"enableRateLimit": True, "timeout": 30_000})
-            client.load_markets()
-            self._ccxt_client = client
+        if self._ccxt_client is not None:
+            return self._ccxt_client
+        errors: list[str] = []
+        for exchange_id in self.exchange_ids:
+            if exchange_id == exclude:
+                continue
+            try:
+                client = getattr(ccxt, exchange_id)({"enableRateLimit": True, "timeout": 30_000})
+                client.load_markets()
+                self._ccxt_client = client
+                self._ccxt_exchange = exchange_id
+                return client
+            except Exception as exc:  # noqa: BLE001 - try the next exchange
+                errors.append(f"{exchange_id}: {exc}")
+        raise GoldDataError("no reachable PAXG exchange: " + " | ".join(errors))
+
+    def _paxg_fetch(self, timeframe: str, limit: int) -> pd.DataFrame:
+        client = self._paxg_client()
         try:
-            raw = self._ccxt_client.fetch_ohlcv(PAXG_SYMBOL, timeframe=timeframe, limit=limit)
-        except Exception as exc:  # noqa: BLE001
-            raise GoldDataError(f"PAXG fallback failed: {exc}") from exc
+            raw = client.fetch_ohlcv(PAXG_SYMBOL, timeframe=timeframe, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - exchange may be gone: rebuild once
+            bad = self._ccxt_exchange
+            self._ccxt_client = None
+            self._ccxt_exchange = None
+            try:
+                raw = self._paxg_client(exclude=bad).fetch_ohlcv(
+                    PAXG_SYMBOL, timeframe=timeframe, limit=limit
+                )
+            except Exception as exc2:  # noqa: BLE001
+                raise GoldDataError(f"PAXG fallback failed: {exc2}") from exc
         if not raw:
             raise GoldDataError("PAXG fallback returned no data")
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])

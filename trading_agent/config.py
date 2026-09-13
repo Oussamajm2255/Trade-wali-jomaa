@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     htf_bias_filter_enabled: bool = True
     htf_adx_min: float = 20.0
 
+    # --- PAXG 24/7 fallback (weekends / stale futures) ---
+    # Exchanges tried in order until one answers. Binance blocks US
+    # datacenter IPs (Railway), so Kraken takes over automatically there.
+    paxg_exchanges: list[str] = ["binance", "kraken", "okx"]
+
     # --- Risk (paper) ---
     paper_starting_equity: float = 10_000.0
     risk_per_trade: float = 0.01
