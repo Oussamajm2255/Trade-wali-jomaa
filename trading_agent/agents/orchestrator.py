@@ -11,7 +11,9 @@ from trading_agent.agents.regime import RegimeAgent
 from trading_agent.agents.sentiment import SentimentAgent
 from trading_agent.agents.technical import TechnicalAgent
 from trading_agent.config import Settings
-from trading_agent.data.bias import compute_htf_bias
+from trading_agent.data.market import MarketDataError
+from trading_agent.data.quality import QualityState
+from trading_agent.data.snapshot import build_market_snapshot
 from trading_agent.data.market import MarketData
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import (
@@ -88,50 +90,57 @@ class Orchestrator:
     ) -> tuple[SignalProposal | Rejection, dict[str, AgentVerdict], dict, dict | None]:
         """Full pipeline; also returns verdicts/snapshot/gauge for reporting."""
         timeframe = timeframe or self.settings.timeframe
-        df, snapshot, gauge = self.market.analysis_input(symbol, timeframe, self.settings.ohlcv_limit)
+        # One coherent snapshot per cycle (spec §3): entry TF + higher TFs,
+        # each validated. FAIL stops the cycle before any AI call (§4/§48).
+        try:
+            snap = build_market_snapshot(self.market, symbol, self.settings, timeframe)
+        except MarketDataError as exc:
+            logger.error("market data unavailable for %s: %s", symbol, exc)
+            return Rejection(symbol=symbol, reason=f"market data unavailable: {exc}"), {}, {}, None
+        htf_tf = (
+            self.settings.htf_timeframe
+            if self.settings.htf_bias_filter_enabled and timeframe != self.settings.htf_timeframe
+            else None
+        )
+        entry = snap.entry_snapshot_for_llm(htf_tf)
+        if snap.quality_state == QualityState.FAIL:
+            return (
+                Rejection(symbol=symbol, reason=f"data quality FAIL: {'; '.join(snap.quality_issues[:3])}"),
+                {},
+                entry,
+                snap.dxy,
+            )
+        if snap.degraded and not self.settings.data_quality_allow_degraded:
+            return (
+                Rejection(
+                    symbol=symbol,
+                    reason=f"data quality DEGRADED (blocked by config): {'; '.join(snap.quality_issues[:3])}",
+                ),
+                {},
+                entry,
+                snap.dxy,
+            )
 
-        # Pro multi-timeframe: the entry TF spots triggers, the HTF sets the
-        # directional bias (deterministic, computed locally). The bias is both
-        # shown to the LLM (context) and enforced by the risk engine (hard gate).
-        htf_bias: dict | None = None
-        if self.settings.htf_bias_filter_enabled and timeframe != self.settings.htf_timeframe:
-            try:
-                htf_df = self.market.fetch_ohlcv(
-                    symbol, self.settings.htf_timeframe, self.settings.ohlcv_limit
-                )
-                htf_bias = compute_htf_bias(htf_df, self.settings.htf_adx_min)
-                snapshot["htf_bias"] = {
-                    "timeframe": self.settings.htf_timeframe,
-                    "bias": htf_bias["bias"],
-                    "detail": htf_bias["detail"],
-                    "adx": htf_bias["adx"],
-                }
-            except Exception as exc:  # noqa: BLE001 - fail closed below
-                logger.error("HTF bias unavailable for %s: %s", symbol, exc)
-                return (
-                    Rejection(symbol=symbol, reason=f"HTF bias unavailable: {exc}"),
-                    {},
-                    snapshot,
-                    gauge,
-                )
-
-        verdicts = self._run_agents(snapshot, gauge)
+        # The bias gate's source is the canonical snapshot (fail-closed above).
+        htf_bias = snap.biases.get(self.settings.htf_timeframe) if htf_tf else None
+        verdicts = self._run_agents(entry, snap.dxy)
         if not verdicts:
-            return Rejection(symbol=symbol, reason="all analysis agents failed"), verdicts, snapshot, gauge
+            return Rejection(symbol=symbol, reason="all analysis agents failed"), verdicts, entry, snap.dxy
         side, confidence = self._fuse(verdicts)
-        last = df.iloc[-1]
+        last = snap.candles[timeframe].iloc[-1]
         result = self.risk.evaluate(
             symbol=symbol,
             timeframe=timeframe,
             side=side,
             confidence=confidence,
             price=float(last["close"]),
-            atr=float(snapshot["atr_14"]),
+            atr=float(entry["atr_14"]),
             verdicts=verdicts,
-            gauge=gauge,
+            gauge=snap.dxy,
             htf_bias=htf_bias,
+            context=snap.context_for_risk(),
         )
-        return result, verdicts, snapshot, gauge
+        return result, verdicts, entry, snap.dxy
 
     def run(self, symbol: str, timeframe: str | None = None) -> SignalProposal | Rejection:
         return self.run_full(symbol, timeframe)[0]

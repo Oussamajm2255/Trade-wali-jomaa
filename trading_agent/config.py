@@ -92,6 +92,22 @@ class Settings(BaseSettings):
     # balance falls below this threshold (0 balance = degraded mode).
     deepseek_balance_warn_usd: float = 1.0
 
+    # --- Canonical snapshot (INTELLIGENCE_V2 — phase 1) ---
+    # One coherent snapshot per analysis cycle: the entry timeframe plus
+    # these higher timeframes, each validated, with indicators + bias.
+    # All downstream modules consume this snapshot instead of fetching
+    # or computing overlapping data independently.
+    snapshot_timeframes: list[str] = ["1h", "4h", "1d"]
+
+    # --- Data quality validation ---
+    # FAIL stops the cycle (no AI calls, no proposal). DEGRADED continues
+    # only when data_quality_allow_degraded is true, and is clearly
+    # labelled and stored on every signal and rejected opportunity.
+    data_quality_min_candles: int = 60
+    data_quality_max_stale_multiple: float = 3.0  # last candle age vs TF duration
+    data_quality_allow_degraded: bool = True
+    dxy_max_age_hours: int = 48  # older DXY gauge = degraded
+
     # --- Risk (paper) ---
     paper_starting_equity: float = 10_000.0
     risk_per_trade: float = 0.01

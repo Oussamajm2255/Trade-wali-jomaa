@@ -137,6 +137,7 @@ class RiskEngine:
         verdicts: dict[str, AgentVerdict],
         gauge: dict | None,
         htf_bias: dict | None = None,
+        context: dict | None = None,
     ) -> SignalProposal | Rejection:
         """Apply every hard gate; return a proposal or a logged rejection."""
         with session_scope() as session:
@@ -225,6 +226,13 @@ class RiskEngine:
 
             models = sorted({v.model for v in verdicts.values()})
             rationale = self._rationale(verdicts, gauge)
+            evidence = {
+                "verdicts": {name: v.model_dump() for name, v in verdicts.items()},
+                "sentiment_gauge": gauge,
+                "atr": atr,
+            }
+            if context:
+                evidence["context"] = context
             return SignalProposal(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -237,11 +245,7 @@ class RiskEngine:
                 risk_amount=round(risk_amount, 2),
                 expected_rr=self.s.take_profit_rr,
                 rationale=rationale,
-                evidence={
-                    "verdicts": {name: v.model_dump() for name, v in verdicts.items()},
-                    "sentiment_gauge": gauge,
-                    "atr": atr,
-                },
+                evidence=evidence,
                 model="+".join(models) if models else "unknown",
             )
 

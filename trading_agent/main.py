@@ -40,6 +40,7 @@ from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import Rejection, SignalProposal
 from trading_agent.store import actions
 from trading_agent.store.db import init_engine
+from trading_agent.versioning import version_stamp
 
 console = Console()
 logger = logging.getLogger("trading_agent")
@@ -535,6 +536,18 @@ def cmd_loop(args: argparse.Namespace) -> None:
 
                 if isinstance(result, Rejection):
                     console.print(f"[dim]{symbol}: no trade — {result.reason}[/]")
+                    # Every rejected opportunity stores its data-quality state
+                    # and strategy version (spec §4/§22 — audit the NO-trades).
+                    actions.audit(
+                        "INFO",
+                        "proposal_rejected_by_risk",
+                        {
+                            "symbol": symbol,
+                            "reason": result.reason,
+                            "data_quality": snapshot.get("data_quality", "n/a"),
+                            "strategy_version": version_stamp()["strategy_version"],
+                        },
+                    )
                     continue
                 proposal_id = actions.save_proposal(result)
                 console.print(
