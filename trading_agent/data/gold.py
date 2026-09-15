@@ -168,6 +168,48 @@ class GoldData:
         self.last_source = source
         return df
 
+    def dxy_ohlcv(self, timeframe: str = "15m", limit: int = 300) -> pd.DataFrame:
+        """Intraday DXY candles for the deterministic DXY context (spec §9).
+
+        Prefers broker-native MT5 candles (24/7, even weekends) and falls
+        back to yfinance 1h when MT5 is not connected or fails.
+        """
+        key = ("DXY", timeframe)
+        now = time.time()
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached and now - cached[0] < 60.0 and len(cached[1]) >= min(limit, 50):
+                return cached[1].copy()
+        df: pd.DataFrame | None = None
+        if self.mt5 is not None:
+            try:
+                df = self.mt5.fetch_ohlcv(self.dxy_symbol, timeframe, limit)
+            except Exception as exc:  # noqa: BLE001 - any MT5 failure degrades
+                logger.warning("MT5 DXY candles failed, falling back to yfinance: %s", exc)
+        if df is None or df.empty:
+            df = self._dxy_from_yfinance(limit)
+        if df is None or df.empty:
+            raise GoldDataError("no DXY candle data available")
+        with self._lock:
+            self._cache[key] = (now, df.copy())
+        return df
+
+    def _dxy_from_yfinance(self, limit: int) -> pd.DataFrame | None:
+        try:
+            import yfinance as yf
+
+            data = yf.Ticker(DXY_TICKER).history(period="1mo", interval="60m", auto_adjust=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("yfinance DXY intraday fetch failed: %s", exc)
+            return None
+        if data is None or data.empty:
+            return None
+        df = data.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]].dropna()
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("America/New_York")
+        df.index = df.index.tz_convert("UTC")
+        return df.tail(limit)
+
     def sentiment_gauge(self) -> dict | None:
         """DXY-implied gold sentiment: gold rises when the dollar weakens.
 

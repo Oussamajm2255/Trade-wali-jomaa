@@ -43,11 +43,13 @@ class FakeMarket:
         fail_tfs: tuple[str, ...] = (),
         bad_entry: bool = False,
         source: str = "yfinance:GC=F",
+        dxy_df: pd.DataFrame | None = None,
     ) -> None:
         self.gauge = gauge
         self.fail_tfs = set(fail_tfs)
         self.bad_entry = bad_entry
         self.last_source = source
+        self.dxy_df = dxy_df
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
         if timeframe in self.fail_tfs:
@@ -56,6 +58,11 @@ class FakeMarket:
 
     def sentiment_gauge(self) -> dict | None:
         return self.gauge
+
+    def dxy_ohlcv(self, timeframe: str, limit: int) -> pd.DataFrame:
+        if self.dxy_df is None:
+            raise RuntimeError("fake DXY candles down")
+        return self.dxy_df
 
 
 def make_settings(**overrides) -> Settings:
@@ -80,6 +87,40 @@ def test_builds_all_timeframes_with_pass_quality() -> None:
     assert snap.session["in_session"] in (True, False)
     assert snap.versions["strategy_version"] == "LEGACY_BASELINE"
     assert snap.dxy == gauge
+
+
+def test_snapshot_carries_phase2_deterministic_context() -> None:
+    snap = build_market_snapshot(FakeMarket(gauge=fresh_gauge()), "XAUUSD", make_settings(), "15m")
+    assert set(snap.regimes) == {"15m", "1h", "4h", "1d"}
+    assert snap.regimes["15m"]["regime"] in (
+        "trend_up", "trend_down", "range", "high_volatility", "low_volatility", "transition"
+    )
+    assert snap.alignment["alignment"] in ("BULLISH_ALIGNMENT", "BEARISH_ALIGNMENT", "MIXED", "CONFLICTED")
+    assert snap.structure["timeframe"] == "15m"
+    assert snap.structure["support"] is not None
+    # No intraday DXY candles on the fake -> honest gauge-only context.
+    assert snap.dxy_context["kind"] == "dxy_context"
+    assert snap.dxy_context["source"] == "gauge only"
+    assert snap.gold_context["daily_open"] is not None
+    assert snap.gold_context["prev_day_high"] is not None
+    assert snap.session_context["session"] in ("ASIA", "LONDON", "LONDON_NY_OVERLAP", "NEW_YORK", "OFF_SESSION")
+    entry = snap.entry_snapshot_for_llm("4h")
+    assert "mtf_biases" in entry and "alignment" in entry
+    assert entry["structure"]["timeframe"] == "15m"
+    assert entry["regime"]["regime"] == snap.regimes["15m"]["regime"]
+    assert "1h" in entry["htf_regimes"]
+    assert entry["gold_context"]["daily_open"] is not None
+    assert entry["dxy_context"]["source"] == "gauge only"
+
+
+def test_snapshot_with_intraday_dxy_candles() -> None:
+    dxy = make_df(100, "15m")
+    snap = build_market_snapshot(
+        FakeMarket(gauge=fresh_gauge(), dxy_df=dxy), "XAUUSD", make_settings(), "15m"
+    )
+    assert snap.dxy_context["source"] == "intraday candles"
+    assert snap.dxy_context["level"] is not None
+    assert snap.dxy_context["change_15m_pct"] is not None
 
 
 def test_entry_fetch_failure_raises() -> None:

@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     session_filter_enabled: bool = True
     session_london: str = "08:00-17:00"
     session_new_york: str = "09:30-17:00"
+    # ASIA window (Tokyo local) — used only for the session CLASSIFICATION
+    # stored with every signal (spec §11); it never gates analysis.
+    session_asia: str = "09:00-18:00"
 
     # --- Multi-timeframe (pro logic) ---
     # TIMEFRAME (15m) is the ENTRY timeframe: triggers, stops, targets.
@@ -107,6 +110,21 @@ class Settings(BaseSettings):
     data_quality_max_stale_multiple: float = 3.0  # last candle age vs TF duration
     data_quality_allow_degraded: bool = True
     dxy_max_age_hours: int = 48  # older DXY gauge = degraded
+
+    # --- Deterministic regime engine (INTELLIGENCE_V2 — phase 2) ---
+    # TREND_UP / TREND_DOWN / RANGE / HIGH_VOLATILITY / LOW_VOLATILITY /
+    # TRANSITION, classified from ADX, ATR behaviour and EMA alignment.
+    regime_adx_trend: float = 25.0
+    regime_atr_high_mult: float = 1.8  # ATR >= 1.8x its median = high vol
+    regime_atr_low_mult: float = 0.55  # ATR <= 0.55x its median = low vol
+
+    # --- Market structure / SMC detection ---
+    structure_swing_left: int = 3
+    structure_swing_right: int = 3
+    structure_tolerance_pct: float = 0.05  # equal highs/lows clustering
+    structure_fvg_min_atr_mult: float = 0.3  # minimum FVG gap vs ATR
+    structure_displacement_atr_mult: float = 1.5  # displacement candle range
+    structure_sweep_lookback: int = 30
 
     # --- Risk (paper) ---
     paper_starting_equity: float = 10_000.0
