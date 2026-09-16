@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from trading_agent.config import Settings
 from trading_agent.data.alignment import classify_alignment
 from trading_agent.data.bias import compute_htf_bias
+from trading_agent.data.calendar import build_calendar_provider
 from trading_agent.data.dxy_context import compute_dxy_context, xau_vs_dxy
 from trading_agent.data.gold_context import compute_gold_context
 from trading_agent.data.indicators import adx, atr, build_snapshot, ema, rsi
@@ -36,6 +37,7 @@ from trading_agent.data.sessions import (
     session_start_utc,
     session_state,
 )
+from trading_agent.data.shock import detect_shock
 from trading_agent.data.structure import detect_structure
 from trading_agent.versioning import version_stamp
 
@@ -63,6 +65,11 @@ class MarketSnapshot(BaseModel):
     gold_context: dict = Field(default_factory=dict)
     session: dict = Field(default_factory=dict)
     session_context: dict = Field(default_factory=dict)
+    # Phase 8: normalized economic-calendar events ahead of this cycle
+    # (spec §43, empty = provider offline) and the deterministic shock
+    # classification (spec §44).
+    news_context: list[dict] = Field(default_factory=list)
+    shock_context: dict = Field(default_factory=dict)
     data_quality: DataQuality = Field(default_factory=DataQuality)
     versions: dict = Field(default_factory=dict)
 
@@ -108,6 +115,8 @@ class MarketSnapshot(BaseModel):
         snap["structure"] = self.structure
         snap["gold_context"] = self.gold_context
         snap["dxy_context"] = self.dxy_context
+        snap["news_context"] = self.news_context
+        snap["shock_context"] = self.shock_context
         return snap
 
     def context_for_risk(self) -> dict:
@@ -123,6 +132,8 @@ class MarketSnapshot(BaseModel):
             "regime": self.regimes.get(self.entry_timeframe, {}),
             "dxy_context": self.dxy_context,
             "gold_context": self.gold_context,
+            "news_context": self.news_context,
+            "shock_context": self.shock_context,
             "versions": self.versions,
         }
 
@@ -284,6 +295,31 @@ def build_market_snapshot(
             snap.dxy_context["xau_vs_dxy"] = xau_vs_dxy(snap.candles[entry_tf], dxy_df)
         except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
             logger.warning("xau_vs_dxy failed: %s", exc)
+
+    # Phase 8: shock classification (spec §44) — pure candle math, uses
+    # the gauge spread when the provider supplies one. The economic
+    # calendar (spec §43) is optional and always fails open: a broken
+    # feed degrades to "no events", never to fabricated ones.
+    try:
+        gauge_spread = snap.dxy.get("spread") if isinstance(snap.dxy, dict) else None
+        snap.shock_context = detect_shock(
+            snap.candles[entry_tf],
+            lookback=settings.shock_lookback,
+            shock_multiple=settings.shock_multiple,
+            expansion_multiple=settings.shock_expansion_multiple,
+            movement_pct=settings.shock_movement_pct,
+            spread_pct_threshold=settings.shock_spread_pct,
+            spread=gauge_spread,
+        )
+    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+        logger.warning("shock detection failed: %s", exc)
+    try:
+        provider = getattr(market, "calendar_provider", None) or build_calendar_provider(settings)
+        snap.news_context = provider.upcoming_events(
+            snap.timestamp, max(settings.news_block_minutes, 60)
+        )
+    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+        logger.warning("economic calendar failed: %s", exc)
 
     qualities.append(validate_indicators(snap.indicators[entry_tf]))
 

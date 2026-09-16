@@ -64,6 +64,10 @@ def _migrate_sqlite(engine: Engine) -> None:
         track_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(agent_track)")}
         if track_columns and "signal_id" not in track_columns:
             conn.exec_driver_sql("ALTER TABLE agent_track ADD COLUMN signal_id VARCHAR(24)")
+        # Phase 8 (§44): shock cooldown anchor on the risk state.
+        risk_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(risk_state)")}
+        if risk_columns and "last_shock_ts" not in risk_columns:
+            conn.exec_driver_sql("ALTER TABLE risk_state ADD COLUMN last_shock_ts DATETIME")
 
 
 def _seed_risk_state() -> None:

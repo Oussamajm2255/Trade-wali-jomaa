@@ -93,6 +93,11 @@ class RiskState(Base):
     peak_equity: Mapped[float]
     halted: Mapped[bool] = mapped_column(Boolean, default=False)
     halt_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 8 (spec §44): anchor of the shock cooldown — persisted so the
+    # cooldown survives restarts.
+    last_shock_ts: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

@@ -42,6 +42,7 @@ from trading_agent.agents.base import LLMClient
 from trading_agent.agents.orchestrator import Orchestrator, llm_degraded
 from trading_agent.backtest.engine import BacktestEngine, BacktestError
 from trading_agent.config import Settings, get_settings
+from trading_agent.data.calendar import build_calendar_provider
 from trading_agent.data.gold import GoldData, GoldDataError
 from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.sessions import session_state
@@ -97,16 +98,20 @@ def _market_for(settings: Settings, symbol: str, mt5=None):
     """Gold symbols use the gold provider; everything else uses crypto ccxt.
 
     In live mode the connected MT5 broker feeds broker-native DXY candles
-    (24/7) to the gold provider.
+    (24/7) to the gold provider. A long-lived economic-calendar provider
+    (spec §43) is attached so its 5-minute result cache spans cycles.
     """
     if symbol.upper() in GOLD_SYMBOLS:
-        return GoldData(
+        market = GoldData(
             settings.exchange_id,
             mt5=mt5,
             dxy_symbol=settings.mt5_dxy_symbol,
             exchange_ids=settings.paxg_exchanges,
         )
-    return MarketData(settings.exchange_id)
+    else:
+        market = MarketData(settings.exchange_id)
+    market.calendar_provider = build_calendar_provider(settings)  # type: ignore[attr-defined]
+    return market
 
 
 def _print_verdicts(verdicts: dict, snapshot: dict, gauge: dict | None) -> None:

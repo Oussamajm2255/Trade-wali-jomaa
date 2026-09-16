@@ -30,6 +30,9 @@ STRATEGY_PROFILES: dict[str, dict] = {
         "require_statistical_edge": False,
         "statistical_quality_enabled": False,
         "no_trade_high_volatility": False,
+        # Phase 8 gates did not exist pre-upgrade.
+        "shock_enabled": False,
+        "news_filter_enabled": False,
     },
     "intelligence_v2": {},
 }

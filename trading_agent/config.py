@@ -195,6 +195,31 @@ class Settings(BaseSettings):
     # 0 = spread ceiling disabled.
     ai_skip_max_spread_pct: float = 0.0
 
+    # --- Economic calendar (INTELLIGENCE_V2 — phase 8, spec §43) ---
+    # Optional by design: events only ever come from a real provider
+    # (never from the LLM). "null" = offline (no events, no blocking).
+    # When enabled, a HIGH-importance USD event within
+    # news_block_minutes refuses new entries with NEWS_RISK.
+    news_filter_enabled: bool = False
+    news_provider: str = "null"  # "null" | "finnhub"
+    finnhub_api_key: str = ""  # free read-only key from finnhub.io
+    news_block_minutes: int = 30
+    news_min_importance: str = "HIGH"  # HIGH | MEDIUM | LOW
+
+    # --- Market shock detection (INTELLIGENCE_V2 — phase 8, spec §44) ---
+    # Deterministic classification from candle range / ATR / volume /
+    # price movement / spread versus a rolling baseline: NORMAL,
+    # VOLATILITY_EXPANSION (warning) or SHOCK (blocks new entries).
+    # A SHOCK also starts a persisted cooldown (shock_cooldown_minutes).
+    shock_enabled: bool = True
+    shock_lookback: int = 60  # baseline candles (current excluded)
+    shock_expansion_multiple: float = 1.8  # axis ratio -> VOLATILITY_EXPANSION
+    shock_multiple: float = 3.0  # axis ratio -> SHOCK
+    shock_movement_pct: float = 1.0  # body/gap % of price -> SHOCK
+    shock_spread_pct: float = 0.0  # spread % of price -> SHOCK (0 = off)
+    shock_block_new_entries: bool = True
+    shock_cooldown_minutes: int = 30  # keep blocking after a SHOCK (0 = off)
+
     # --- Statistical quality gate (INTELLIGENCE_V2 — phase 6, spec §31/§32) ---
     # Compares the candidate against resolved signals sharing its
     # side/regime/DXY class. Below min_sample_for_statistics the quality

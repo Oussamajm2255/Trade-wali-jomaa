@@ -66,6 +66,12 @@ _SESSION_LABELS = {
 }
 _DECISION_LABELS = {"proposal": "Proposé", "rejected": "Rejeté"}
 
+_SHOCK_LABELS = {
+    "NORMAL": "Normal",
+    "VOLATILITY_EXPANSION": "Expansion de volatilité",
+    "SHOCK": "CHOC",
+}
+
 
 def _utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
@@ -156,6 +162,12 @@ def collect(session: Session, limit: int = 5000) -> dict:
 
     snap = latest.market_snapshot if latest else {}
     fusion = latest.fusion or {} if latest else {}
+    news = snap.get("news_context") or []
+    next_news = min(
+        (e for e in news if (e.get("minutes_to_event") or 0) >= 0),
+        key=lambda e: e.get("minutes_to_event") or 0,
+        default=None,
+    )
     current = {
         "ts": latest.ts.isoformat() if latest else None,
         "symbol": latest.symbol if latest else None,
@@ -171,6 +183,8 @@ def collect(session: Session, limit: int = 5000) -> dict:
         "calibrated": fusion.get("calibrated_confidence"),
         "setup_quality": (latest.setup_quality or {}).get("score") if latest else None,
         "mtf_biases": snap.get("mtf_biases") or {},
+        "shock": (snap.get("shock_context") or {}).get("state"),
+        "next_news": next_news,
     }
 
     recent_signals = []
@@ -290,6 +304,12 @@ def render_html(data: dict) -> str:
         ("Confiance", f"{c['confidence']:.2f}" if c["confidence"] is not None else "—"),
         ("Confiance calibrée", f"{c['calibrated']:.2f}" if c["calibrated"] is not None else "—"),
         ("Qualité du setup", f"{c['setup_quality']:.2f}" if c["setup_quality"] is not None else "—"),
+        ("Choc de marché", _SHOCK_LABELS.get(c.get("shock"), "—")),
+        (
+            "Prochaine news",
+            f"{c['next_news']['event']} dans {c['next_news']['minutes_to_event']}m"
+            if c.get("next_news") else "—",
+        ),
     ]
     dxy_gauge = c["dxy_gauge"]
     dxy_ctx = c["dxy_context"]

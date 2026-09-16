@@ -12,12 +12,14 @@ proposals with a classified no_trade_reason.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trading_agent.config import Settings
+from trading_agent.data.calendar import blocking_events
+from trading_agent.data.shock import ShockState
 from trading_agent.fusion.types import ConflictState, FusionContext, NoTradeReason
 from trading_agent.schema.types import AgentVerdict, Rejection, Side, SignalProposal
 from trading_agent.store.db import session_scope
@@ -26,6 +28,13 @@ from trading_agent.store.models import AuditLog, Position, RiskState
 logger = logging.getLogger(__name__)
 
 MIN_NOTIONAL = 5.0  # refuse dust-sized paper positions (USD)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Normalise a possibly-naive SQLite datetime to aware UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 class RiskEngine:
@@ -183,6 +192,67 @@ class RiskEngine:
                     reason=f"confidence {confidence:.2f} below minimum {self.s.min_confidence}",
                     no_trade_reason=NoTradeReason.LOW_CONFIDENCE.value,
                 )
+
+            # --- News gate (spec §43), opt-in. Events come from a real
+            # calendar provider only; a HIGH-importance USD event within
+            # news_block_minutes refuses new entries with NEWS_RISK.
+            if self.s.news_filter_enabled:
+                news = (context or {}).get("news_context") or []
+                blocking = blocking_events(
+                    news, self.s.news_min_importance, self.s.news_block_minutes
+                )
+                if blocking:
+                    detail = "; ".join(
+                        f"{e['event']} in {e['minutes_to_event']}m ({e['importance']})"
+                        for e in blocking[:3]
+                    )
+                    mark("news", "reject", detail)
+                    return Rejection(
+                        symbol=symbol,
+                        reason=f"news blackout: {detail}",
+                        no_trade_reason=NoTradeReason.NEWS_RISK.value,
+                    )
+                mark("news", "pass", f"{len(news)} event(s) in window")
+
+            # --- Shock gate (spec §44). SHOCK blocks new entries (or
+            # applies the persisted cooldown); VOLATILITY_EXPANSION is a
+            # warning in the trail, never a block by itself.
+            if self.s.shock_enabled:
+                shock = (context or {}).get("shock_context") or {}
+                shock_state = shock.get("state") or ShockState.NORMAL
+                now_ts = now or datetime.now(timezone.utc)
+                if shock_state == ShockState.SHOCK:
+                    state.last_shock_ts = now_ts  # cooldown anchor, persisted
+                    detail = shock.get("detail", "shock")
+                    if self.s.shock_block_new_entries:
+                        mark("shock", "reject", detail)
+                        return Rejection(
+                            symbol=symbol,
+                            reason=f"market shock: {detail}",
+                            no_trade_reason=NoTradeReason.SHOCK.value,
+                        )
+                    mark("shock", "warning", detail)
+                elif (
+                    state.last_shock_ts is not None
+                    and self.s.shock_cooldown_minutes > 0
+                    and _as_utc(state.last_shock_ts)
+                    + timedelta(minutes=self.s.shock_cooldown_minutes)
+                    >= now_ts
+                ):
+                    elapsed = int((now_ts - _as_utc(state.last_shock_ts)).total_seconds() // 60)
+                    detail = (
+                        f"shock cooldown: {self.s.shock_cooldown_minutes - elapsed}m remaining"
+                    )
+                    mark("shock", "reject", detail)
+                    return Rejection(
+                        symbol=symbol,
+                        reason=f"market shock cooldown: {detail}",
+                        no_trade_reason=NoTradeReason.SHOCK.value,
+                    )
+                elif shock_state == ShockState.VOLATILITY_EXPANSION:
+                    mark("shock", "warning", shock.get("detail", "volatility expansion"))
+                else:
+                    mark("shock", "pass", shock.get("detail", "normal volatility"))
 
             # --- No-trade gates (spec §20), fusion-layer inputs. ---
             no_trade = self._no_trade_rejection(symbol, fusion_context)
