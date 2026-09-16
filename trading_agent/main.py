@@ -10,6 +10,10 @@ Commands (paper mode):
   signals [--symbol]       recent complete signal records (spec §22)
   signal ID                one full signal record with gate trail
   backtest SYMBOL [--tf]   candle-by-candle historical replay (deterministic)
+  walkforward SYMBOL       walk-forward out-of-sample validation (spec §26)
+  sensitivity SYMBOL       parameter sensitivity sweeps (spec §27)
+  montecarlo SYMBOL        Monte Carlo risk analysis (spec §28)
+  quality SYMBOL           regime analytics + conditional expectancy (spec §29/§30)
   history [--limit N]      recent audit events
   reset-halt               clear the kill-switch after manual review
   loop [--symbols ...]     continuous paper trading loop (stop/target mgmt + proposals)
@@ -43,7 +47,7 @@ from trading_agent.notify.telegram import TelegramNotifier
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import Rejection, SignalProposal
 from trading_agent.store import actions
-from trading_agent.store.db import init_engine
+from trading_agent.store.db import init_engine, session_scope
 from trading_agent.versioning import version_stamp
 
 console = Console()
@@ -405,29 +409,40 @@ def cmd_signal(args: argparse.Namespace) -> None:
         console.print(f"[dim]snapshot: {snap.get('error', 'unavailable')}[/]")
 
 
-def cmd_backtest(args: argparse.Namespace) -> None:
-    """Candle-by-candle historical replay (spec §24) — deterministic AI."""
-    settings = get_settings()
-    symbol = args.symbol
-    tf = args.tf or settings.timeframe
+def _fetch_frames(
+    settings: Settings, symbol: str, tf: str, limit: int
+) -> tuple[dict, object | None]:
+    """Fetch multi-timeframe history (and DXY) for offline analytics.
+
+    Entry TF is mandatory; other timeframes degrade like live.
+    """
     market = _market_for(settings, symbol)
-    limit = args.limit or settings.backtest_history_limit
     tfs = [tf] + [t for t in settings.snapshot_timeframes if t != tf]
     frames: dict = {}
     for t in tfs:
         try:
             frames[t] = market.fetch_ohlcv(symbol, t, limit)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - one missing TF degrades like live
-            logger.warning("backtest frame %s unavailable: %s", t, exc)
-    if tf not in frames:
-        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
-        sys.exit(1)
+            logger.warning("analytics frame %s unavailable: %s", t, exc)
     dxy = None
     if hasattr(market, "dxy_ohlcv"):
         try:
             dxy = market.dxy_ohlcv("1h", limit)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - gauge/context degrade like live
-            logger.warning("backtest DXY history unavailable: %s", exc)
+            logger.warning("analytics DXY history unavailable: %s", exc)
+    return frames, dxy
+
+
+def cmd_backtest(args: argparse.Namespace) -> None:
+    """Candle-by-candle historical replay (spec §24) — deterministic AI."""
+    settings = get_settings()
+    symbol = args.symbol
+    tf = args.tf or settings.timeframe
+    limit = args.limit or settings.backtest_history_limit
+    frames, dxy = _fetch_frames(settings, symbol, tf, limit)
+    if tf not in frames:
+        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
+        sys.exit(1)
     engine = BacktestEngine(
         settings=settings,
         frames=frames,
@@ -482,6 +497,234 @@ def _print_backtest(report, as_json: bool = False) -> None:
                 str(t.bars_open),
             )
         console.print(table)
+
+
+def _fmt_stat(value: float | None) -> str:
+    return "-" if value is None else f"{value:.4f}"
+
+
+def cmd_walkforward(args: argparse.Namespace) -> None:
+    """Walk-forward validation (spec §26): consecutive out-of-sample replays."""
+    from trading_agent.analytics.walk_forward import WalkForwardConfig, run_walk_forward
+
+    settings = get_settings()
+    symbol = args.symbol
+    tf = args.tf or settings.timeframe
+    limit = args.limit or settings.backtest_history_limit
+    frames, dxy = _fetch_frames(settings, symbol, tf, limit)
+    if tf not in frames:
+        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
+        sys.exit(1)
+    config = WalkForwardConfig(
+        train_bars=args.train, val_bars=args.val, test_bars=args.test, step_bars=args.step
+    )
+    try:
+        report = run_walk_forward(
+            settings, frames, config, symbol=symbol, timeframe=tf,
+            dxy_frames=dxy, warmup=args.warmup,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        sys.exit(1)
+    if args.json:
+        console.print_json(report.to_dict())
+        return
+    agg = report.aggregate
+    console.print(Panel.fit(
+        f"[bold]{report.symbol} {report.timeframe}[/] walk-forward "
+        f"train {report.config.train_bars} / val {report.config.val_bars} / "
+        f"test {report.config.test_bars} bars (step {report.config.step_bars})\n"
+        f"windows {agg['windows']} | trades {agg['total_trades']} | "
+        f"profitable windows {agg['profitable_windows']}/{agg['windows']} "
+        f"({agg['profitable_ratio']})\n"
+        f"avg expectancy {agg['avg_expectancy_r']} R (median {agg['median_expectancy_r']}, "
+        f"stdev {agg['stdev_expectancy_r']}) | avg win rate {agg['avg_win_rate']}",
+        title="Walk-forward validation (out-of-sample)",
+    ))
+    table = Table(title="Windows", box=box.ROUNDED)
+    for col in ("Test window", "Candles", "Trades", "Win rate", "Expectancy R", "Total R"):
+        table.add_column(col, justify="right")
+    for w in report.windows:
+        s = w.stats
+        table.add_row(
+            f"{w.test_start[11:16]} -> {w.test_end[11:16]} {w.test_start[:10]}",
+            str(w.candles), str(s.get("trades", 0)), _fmt_stat(s.get("win_rate")),
+            _fmt_stat(s.get("expectancy_r")), _fmt_stat(s.get("total_r")),
+        )
+    console.print(table)
+
+
+def cmd_sensitivity(args: argparse.Namespace) -> None:
+    """Parameter sensitivity (spec §27): one deterministic replay per grid value."""
+    from trading_agent.analytics.sensitivity import ALLOWED_PARAMETERS, run_sensitivity
+
+    settings = get_settings()
+    symbol = args.symbol
+    tf = args.tf or settings.timeframe
+    limit = args.limit or settings.backtest_history_limit
+    frames, dxy = _fetch_frames(settings, symbol, tf, limit)
+    if tf not in frames:
+        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
+        sys.exit(1)
+    grid: dict[str, list[float]] = {}
+    for spec in args.param:
+        name, _, raw = spec.partition("=")
+        name = name.strip()
+        if not name or not raw:
+            console.print(f"[red]--param must be name=v1,v2,... (got '{spec}')[/]")
+            sys.exit(1)
+        if name not in ALLOWED_PARAMETERS:
+            console.print(
+                f"[red]unknown parameter '{name}' — allowed: {sorted(ALLOWED_PARAMETERS)}[/]"
+            )
+            sys.exit(1)
+        grid[name] = [float(v) for v in raw.split(",") if v.strip()]
+    if not grid:
+        console.print("[yellow]No --param given: nothing to sweep.[/]")
+        sys.exit(1)
+    report = run_sensitivity(
+        settings, frames, grid, symbol=symbol, timeframe=tf,
+        dxy_frames=dxy, warmup=args.warmup, spread_pct=args.spread,
+    )
+    if args.json:
+        console.print_json(report.to_dict())
+        return
+    table = Table(title=f"Sensitivity — {report.symbol} {report.timeframe}", box=box.ROUNDED)
+    for col in ("Parameter", "Value", "Trades", "Win rate", "Expectancy R", "PF", "Max DD %"):
+        table.add_column(col, justify="right")
+    for p in report.points:
+        s = p.stats
+        table.add_row(
+            p.parameter, f"{p.value:g}", str(s.get("trades", 0)), _fmt_stat(s.get("win_rate")),
+            _fmt_stat(s.get("expectancy_r")), _fmt_stat(s.get("profit_factor")),
+            _fmt_stat(s.get("max_drawdown_pct")),
+        )
+    console.print(table)
+    regions = report.stable_regions("expectancy_r")
+    best = report.best_stable("expectancy_r")
+    lines = []
+    for parameter, spans in regions.items():
+        label = ", ".join(f"{r['start']:g}..{r['end']:g}" for r in spans) or "none"
+        lines.append(f"{parameter}: stable ranges [{label}] | best stable {best.get(parameter)}")
+    console.print(Panel.fit(
+        "\n".join(lines),
+        title="Stability (prefer stable regions over peak results — spec §27)",
+    ))
+
+
+def cmd_montecarlo(args: argparse.Namespace) -> None:
+    """Monte Carlo risk analysis (spec §28) over a deterministic backtest."""
+    from trading_agent.analytics.monte_carlo import run_monte_carlo
+
+    settings = get_settings()
+    symbol = args.symbol
+    tf = args.tf or settings.timeframe
+    limit = args.limit or settings.backtest_history_limit
+    frames, dxy = _fetch_frames(settings, symbol, tf, limit)
+    if tf not in frames:
+        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
+        sys.exit(1)
+    engine = BacktestEngine(
+        settings=settings, frames=frames, symbol=symbol, timeframe=tf,
+        dxy_frames=dxy, db_url="sqlite:///:memory:",
+        spread_pct=args.spread, warmup=args.warmup,
+    )
+    try:
+        run = engine.run()
+    except BacktestError as exc:
+        console.print(f"[red]{exc}[/]")
+        sys.exit(1)
+    trade_rs = [t.r_multiple for t in run.trades if t.r_multiple is not None]
+    if not trade_rs:
+        console.print("[yellow]No trades in the backtest — Monte Carlo needs a sample.[/]")
+        sys.exit(1)
+    report = run_monte_carlo(
+        trade_rs, n=args.n, seed=args.seed,
+        risk_per_trade=args.risk, ruin_pct=args.ruin,
+    )
+    if args.json:
+        payload = report.to_dict()
+        payload["sample_trades"] = len(trade_rs)
+        console.print_json(payload)
+        return
+    console.print(Panel.fit(
+        f"[bold]{report.n_simulations} randomized orderings[/] of "
+        f"{len(trade_rs)} trade R multiples (seed {report.seed})\n"
+        f"risk of ruin (equity <= {args.ruin * 100:.0f}% start): "
+        f"{report.risk_of_ruin * 100:.1f}%\n"
+        f"max drawdown pct    p5 {report.max_drawdown_pct['p5']} | "
+        f"p50 {report.max_drawdown_pct['p50']} | p95 {report.max_drawdown_pct['p95']}\n"
+        f"max losing streak   p5 {report.max_losing_streak['p5']:.0f} | "
+        f"p50 {report.max_losing_streak['p50']:.0f} | p95 {report.max_losing_streak['p95']:.0f}\n"
+        f"final equity        p5 {report.final_equity['p5']:,.0f} | "
+        f"p50 {report.final_equity['p50']:,.0f} | p95 {report.final_equity['p95']:,.0f}",
+        title="Monte Carlo risk analysis — NOT a profitability claim (spec §28)",
+    ))
+
+
+def cmd_quality(args: argparse.Namespace) -> None:
+    """Regime analytics / conditional expectancy (spec §29/§30)."""
+    from trading_agent.analytics.stats import (
+        breakdown, compute_trade_stats, conditional_expectancy, resolved_signals,
+    )
+
+    if args.db:
+        init_engine(args.db)
+    settings = get_settings()
+    symbol = args.symbol
+    with session_scope() as session:
+        rows = resolved_signals(session, limit=args.limit, symbol=symbol)
+    if not rows:
+        console.print("[dim]No resolved signals yet — run the loop and close positions first.[/]")
+        return
+    conditions: dict = {}
+    for spec in args.condition:
+        key, _, value = spec.partition("=")
+        if key and value:
+            conditions[key.strip()] = value.strip()
+    if args.json:
+        payload: dict = {
+            "symbol": symbol,
+            "rows": len(rows),
+            "overall": compute_trade_stats(
+                [(r.outcome, r.r_multiple) for r in rows]
+            ).to_dict(),
+            "breakdown": {
+                dim: {k: v.to_dict() for k, v in breakdown(rows, dim).items()}
+                for dim in args.dimension
+            },
+        }
+        if conditions:
+            payload["conditional"] = conditional_expectancy(rows, conditions).to_dict()
+        console.print_json(payload)
+        return
+    if conditions:
+        stats = conditional_expectancy(rows, conditions)
+        console.print(Panel.fit(
+            f"[bold]{symbol}[/] conditional expectancy where {conditions}\n"
+            f"trades {stats.trades} | wins {stats.wins} | win rate {_fmt_stat(stats.win_rate)} | "
+            f"expectancy {_fmt_stat(stats.expectancy_r)} R | PF {_fmt_stat(stats.profit_factor)} | "
+            f"max DD {_fmt_stat(stats.max_drawdown_r)} R",
+            title="Conditional expectancy (spec §30)",
+        ))
+        return
+    for dim in args.dimension or ["side", "regime", "session"]:
+        groups = breakdown(rows, dim)
+        table = Table(title=f"Performance by {dim} (spec §29) — {symbol}", box=box.ROUNDED)
+        for col in ("Group", "Trades", "Wins", "Win rate", "Expectancy R", "PF", "Max DD R"):
+            table.add_column(col, justify="right")
+        for key in sorted(groups, key=lambda k: -groups[k].trades):
+            s = groups[key]
+            table.add_row(
+                key, str(s.trades), str(s.wins), _fmt_stat(s.win_rate),
+                _fmt_stat(s.expectancy_r), _fmt_stat(s.profit_factor),
+                _fmt_stat(s.max_drawdown_r),
+            )
+        console.print(table)
+    console.print(
+        f"[dim]min sample for statistical quality: {settings.min_sample_for_statistics} "
+        f"(gate enabled: {settings.statistical_quality_enabled})[/]"
+    )
 
 
 def cmd_agent_stats(args: argparse.Namespace) -> None:
@@ -839,6 +1082,60 @@ def build_parser() -> argparse.ArgumentParser:
     p_backtest.add_argument("--warmup", type=int, default=None, help="warmup candles (default: OHLCV_LIMIT)")
     p_backtest.add_argument("--json", action="store_true", help="print machine-readable JSON")
     p_backtest.set_defaults(func=cmd_backtest)
+
+    p_wf = sub.add_parser("walkforward", help="walk-forward out-of-sample validation (spec §26)")
+    p_wf.add_argument("symbol")
+    p_wf.add_argument("--tf", default=None, help="timeframe override, e.g. 15m/1h/4h")
+    p_wf.add_argument("--limit", type=int, default=None, help="candles fetched per timeframe")
+    p_wf.add_argument("--train", type=int, default=1000, help="train candles per window (must cover warmup)")
+    p_wf.add_argument("--val", type=int, default=0, help="validation candles per window")
+    p_wf.add_argument("--test", type=int, default=500, help="out-of-sample test candles per window")
+    p_wf.add_argument("--step", type=int, default=None, help="window step in candles (default: --test)")
+    p_wf.add_argument("--warmup", type=int, default=None, help="indicator warmup candles (default: OHLCV_LIMIT)")
+    p_wf.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_wf.set_defaults(func=cmd_walkforward)
+
+    p_sens = sub.add_parser("sensitivity", help="parameter sensitivity sweeps (spec §27)")
+    p_sens.add_argument("symbol")
+    p_sens.add_argument("--tf", default=None, help="timeframe override, e.g. 15m/1h/4h")
+    p_sens.add_argument("--limit", type=int, default=None, help="candles fetched per timeframe")
+    p_sens.add_argument(
+        "--param", action="append", default=[],
+        help="parameter=value1,value2,... (repeatable). Allowed: min_confidence, "
+        "setup_quality_min, dxy_long_min, dxy_short_max, atr_stop_mult, take_profit_rr",
+    )
+    p_sens.add_argument("--warmup", type=int, default=None, help="indicator warmup candles")
+    p_sens.add_argument("--spread", type=float, default=None, help="round-trip spread pct")
+    p_sens.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_sens.set_defaults(func=cmd_sensitivity)
+
+    p_mc = sub.add_parser("montecarlo", help="Monte Carlo risk analysis over a backtest (spec §28)")
+    p_mc.add_argument("symbol")
+    p_mc.add_argument("--tf", default=None, help="timeframe override, e.g. 15m/1h/4h")
+    p_mc.add_argument("--limit", type=int, default=None, help="candles fetched per timeframe")
+    p_mc.add_argument("--n", type=int, default=2000, help="simulations (default 2000)")
+    p_mc.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility")
+    p_mc.add_argument("--risk", type=float, default=0.01, help="risk per trade as equity fraction")
+    p_mc.add_argument("--ruin", type=float, default=0.5, help="ruin threshold: equity fraction of start")
+    p_mc.add_argument("--warmup", type=int, default=None, help="indicator warmup candles")
+    p_mc.add_argument("--spread", type=float, default=None, help="round-trip spread pct")
+    p_mc.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_mc.set_defaults(func=cmd_montecarlo)
+
+    p_qual = sub.add_parser("quality", help="regime analytics + conditional expectancy (spec §29/§30)")
+    p_qual.add_argument("symbol")
+    p_qual.add_argument(
+        "--dimension", action="append", default=[],
+        help="breakdown dimension (side/regime/session/alignment/structure/dxy), repeatable",
+    )
+    p_qual.add_argument(
+        "--condition", action="append", default=[],
+        help="filter condition key=value, e.g. regime=TREND_UP (repeatable)",
+    )
+    p_qual.add_argument("--limit", type=int, default=5000, help="resolved signals read")
+    p_qual.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
+    p_qual.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_qual.set_defaults(func=cmd_quality)
 
     p_stats = sub.add_parser("agent-stats", help="per-agent AI reliability stats (analysis only)")
     p_stats.add_argument("--agent", default=None, help="filter to one agent")

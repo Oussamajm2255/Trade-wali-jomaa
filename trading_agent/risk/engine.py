@@ -190,6 +190,41 @@ class RiskEngine:
                 mark("no_trade", "reject", f"{no_trade.no_trade_reason or 'no_trade'}: {no_trade.reason}")
                 return no_trade
 
+            # --- Statistical quality gate (spec §32), opt-in. ---
+            # Pipeline order (spec): AI SIGNAL -> SETUP QUALITY ->
+            # STATISTICAL QUALITY -> HARD RISK ENGINE. Unknown history
+            # (insufficient sample) never blocks (spec §31); a sufficient
+            # sample whose historical expectancy is below the configured
+            # floor refuses the proposal with STATISTICAL_QUALITY.
+            if self.s.statistical_quality_enabled:
+                sq = self._statistical_quality(
+                    session, symbol, side, fusion_context, gauge, now
+                )
+                if sq.sufficient and sq.historical_expectancy is not None and (
+                    sq.historical_expectancy
+                    < self.s.statistical_quality_min_expectancy
+                ):
+                    reason = (
+                        f"statistical quality: {sq.sample_size} similar signals, "
+                        f"historical expectancy {sq.historical_expectancy:.4f} R below "
+                        f"floor {self.s.statistical_quality_min_expectancy:.4f}"
+                    )
+                    mark("statistical_quality", "reject", reason)
+                    return Rejection(
+                        symbol=symbol,
+                        reason=reason,
+                        no_trade_reason=NoTradeReason.STATISTICAL_QUALITY.value,
+                    )
+                status = "pass" if sq.sufficient else "unknown"
+                mark(
+                    "statistical_quality",
+                    status,
+                    f"sample {sq.sample_size}/{sq.min_sample}, "
+                    f"expectancy {sq.historical_expectancy}",
+                )
+            else:
+                mark("statistical_quality", "pass", "gate disabled")
+
             # DXY concurrency hard gate (gold): the dollar must agree with
             # the trade direction or the signal is refused — no exceptions.
             if self.s.dxy_filter_enabled and gauge and gauge.get("kind") == "dxy":
@@ -374,6 +409,48 @@ class RiskEngine:
                 no_trade_reason=NoTradeReason.STATISTICAL_EDGE_UNKNOWN.value,
             )
         return None
+
+    def _statistical_quality(
+        self,
+        session: Session,
+        symbol: str,
+        side: Side,
+        fusion_context: FusionContext | None,
+        gauge: dict | None,
+        now: datetime | None,
+    ) -> StatisticalQuality:
+        """§31/§32 gate input: quality of signals similar to the candidate.
+
+        Only resolved signals BEFORE this cycle are compared (the
+        no-look-ahead boundary); MFE/MAE come from the positions those
+        signals produced. Imported lazily: the analytics package pulls
+        in the backtest engine, which imports the orchestrator — a cycle
+        if imported at module level.
+        """
+        from trading_agent.analytics.stats import (
+            candidate_features,
+            resolved_signals,
+            statistical_quality,
+        )
+
+        features = candidate_features(
+            side.value,
+            fusion_context.regime if fusion_context else None,
+            gauge,
+        )
+        rows = resolved_signals(
+            session,
+            limit=self.s.calibration_window,
+            before=now,
+            symbol=symbol,
+        )
+        positions = {p.proposal_id: p for p in session.scalars(select(Position))}
+        return statistical_quality(
+            rows,
+            features,
+            min_sample=self.s.min_sample_for_statistics,
+            positions=positions,
+        )
 
     @staticmethod
     def _rationale(verdicts: dict[str, AgentVerdict], gauge: dict | None) -> str:

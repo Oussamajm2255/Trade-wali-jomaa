@@ -1,13 +1,18 @@
 """Shared fixtures: fresh in-memory DB per test, risk settings."""
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 import trading_agent.store.db as db
 from trading_agent.config import Settings
 from trading_agent.store.models import Base, RiskState
+
+# Make shared, non-collected helper modules inside tests/ importable.
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 @pytest.fixture(autouse=True)

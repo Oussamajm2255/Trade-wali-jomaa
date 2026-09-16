@@ -185,6 +185,16 @@ class Settings(BaseSettings):
     no_trade_max_spread_pct: float = 0.0
     require_statistical_edge: bool = False
 
+    # --- Statistical quality gate (INTELLIGENCE_V2 — phase 6, spec §31/§32) ---
+    # Compares the candidate against resolved signals sharing its
+    # side/regime/DXY class. Below min_sample_for_statistics the quality
+    # is UNKNOWN and never blocks (spec §31). With a sufficient sample
+    # whose historical expectancy is below the configured floor the
+    # signal is refused with STATISTICAL_QUALITY (spec §32). Opt-in.
+    min_sample_for_statistics: int = 30
+    statistical_quality_enabled: bool = False
+    statistical_quality_min_expectancy: float = 0.0
+
     # --- Confidence calibration (spec §21) ---
     # calibrated_confidence = historical win rate inside the signal's own
     # 0.05-wide raw-confidence bucket, and only once BOTH sample minimums
