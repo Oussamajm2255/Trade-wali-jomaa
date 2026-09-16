@@ -43,6 +43,57 @@ def _changes(df: pd.DataFrame) -> dict:
     return changes
 
 
+def _steps_for(df: pd.DataFrame, window: str) -> int:
+    """Candles that fit in `window` at the frame's own granularity."""
+    if len(df) < 2:
+        return 0
+    duration = pd.Timedelta(df.index[-1] - df.index[-2])
+    if duration <= pd.Timedelta(0):
+        return 0
+    return int(round(pd.Timedelta(window) / duration))
+
+
+def xau_vs_dxy(gold_df: pd.DataFrame, dxy_df: pd.DataFrame) -> dict | None:
+    """How XAUUSD responded to recent DXY moves (spec §14).
+
+    Deterministic, never by the LLM: same-window percent changes for gold
+    and the dollar, the relationship (inverse = typical for gold, direct =
+    unusual) and a divergence flag when both moved meaningfully in the
+    same direction.
+    """
+    if gold_df is None or dxy_df is None or gold_df.empty or dxy_df.empty:
+        return None
+    out: dict = {
+        "gold_1h_pct": None,
+        "dxy_1h_pct": None,
+        "gold_4h_pct": None,
+        "dxy_4h_pct": None,
+        "relationship_1h": "unknown",
+        "relationship_4h": "unknown",
+        "divergence": False,
+    }
+    divergences = []
+    for label in ("1h", "4h"):
+        g_steps = _steps_for(gold_df, label)
+        d_steps = _steps_for(dxy_df, label)
+        if g_steps >= 1 and d_steps >= 1:
+            out[f"gold_{label}_pct"] = _pct_change(gold_df, g_steps)
+            out[f"dxy_{label}_pct"] = _pct_change(dxy_df, d_steps)
+        g, d = out[f"gold_{label}_pct"], out[f"dxy_{label}_pct"]
+        if g is None or d is None:
+            continue
+        if abs(g) < 0.03 or abs(d) < 0.03:
+            out[f"relationship_{label}"] = "flat"
+        elif (g > 0) == (d > 0):
+            out[f"relationship_{label}"] = "direct"
+            if abs(g) >= 0.05 and abs(d) >= 0.05:
+                divergences.append(label)
+        else:
+            out[f"relationship_{label}"] = "inverse"
+    out["divergence"] = bool(divergences)
+    return out
+
+
 def compute_dxy_context(df: pd.DataFrame | None, gauge: dict | None) -> dict | None:
     """Deterministic DXY context block for the canonical snapshot.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from trading_agent.agents.fallback import regime_fallback, sentiment_fallback, technical_fallback
-from trading_agent.agents.orchestrator import Orchestrator
+from trading_agent.agents.orchestrator import Orchestrator, failure_block_reason
 from trading_agent.config import Settings
 from trading_agent.schema.types import AgentVerdict, Regime, Side
 
@@ -102,3 +102,66 @@ def test_regime_fallback_high_volatility_wins() -> None:
     }
     out = regime_fallback(snap)
     assert out.regime == Regime.HIGH_VOLATILITY
+
+
+# --- Phase 3 (spec §12-§14, §37) ---
+
+
+def test_dxy_verdict_fuses_like_sentiment() -> None:
+    orch = make_orchestrator()
+    verdicts = {
+        "technical": v("technical", {"bias": "long", "conviction": 0.8}),
+        "regime": v("regime", {"regime": "trending_up", "trend_strength": 0.8}),
+        "dxy": v("dxy", {"gold_bias": "long", "score": 0.6}),
+    }
+    side, confidence = orch._fuse(verdicts)
+    assert side == Side.LONG
+    assert confidence == pytest.approx(0.45 * 0.8 + 0.35 * 0.8 + 0.20 * 0.6)
+
+
+def test_regime_trend_direction_flat_overrides_enum() -> None:
+    orch = make_orchestrator()
+    verdicts = {
+        # trend_direction "flat" must neutralise the contribution even
+        # though the enum says trending_up (the LLM interprets, but a
+        # flat direction is authoritative for the sign).
+        "regime": v("regime", {"regime": "trending_up", "trend_strength": 0.9, "trend_direction": "flat"}),
+        "technical": v("technical", {"bias": "neutral", "conviction": 0.1}),
+        "sentiment": v("sentiment", {"score": 0.0}),
+    }
+    side, confidence = orch._fuse(verdicts)
+    assert side == Side.NEUTRAL
+    assert confidence == pytest.approx(0.0)
+
+
+def test_failure_block_policy() -> None:
+    settings = Settings(agent_failure_block_min=2, agent_failure_block_enabled=True)
+    assert failure_block_reason([], settings) is None
+    assert failure_block_reason(["technical"], settings) is None  # 1 = degrade only
+    reason = failure_block_reason(["technical", "regime"], settings)
+    assert reason and "blocked" in reason and "technical" in reason
+    # Disabled policy never blocks.
+    off = Settings(agent_failure_block_min=2, agent_failure_block_enabled=False)
+    assert failure_block_reason(["technical", "regime", "dxy"], off) is None
+
+
+def test_run_agents_routes_dxy_when_context_present() -> None:
+    orch = make_orchestrator()  # no API key -> LLM disabled -> fallbacks
+    gold_snap = {
+        "dxy_context": {"score": 60, "classification": "Bullish (USD weak)"},
+        "rsi_14": 55.0,
+        "ema20_gt_ema50": True,
+        "ema50_gt_ema200": True,
+        "macd_hist": 0.1,
+        "adx_14": 20.0,
+    }
+    verdicts = orch._run_agents(gold_snap, None)
+    assert "dxy" in verdicts and "sentiment" not in verdicts
+    assert all(v.failure_reason is None for v in verdicts.values())
+
+
+def test_run_agents_keeps_sentiment_without_dxy_context() -> None:
+    orch = make_orchestrator()
+    crypto_snap = {"rsi_14": 55.0, "adx_14": 20.0}
+    verdicts = orch._run_agents(crypto_snap, {"value": 50, "classification": "Neutral"})
+    assert "sentiment" in verdicts and "dxy" not in verdicts

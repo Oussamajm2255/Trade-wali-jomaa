@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utcnow() -> datetime:
@@ -35,13 +36,21 @@ class Regime(StrEnum):
 
 
 class TechnicalOutput(BaseModel):
-    """Structured verdict of the technical-analysis agent."""
+    """Structured verdict of the technical-analysis agent (spec §12).
+
+    The LLM must only reason from supplied data; invalidating_condition
+    must state what would prove the idea wrong.
+    """
 
     bias: Bias
     conviction: float = Field(ge=0.0, le=1.0)
+    setup_type: str = ""
+    structure_alignment: float = Field(default=0.0, ge=-1.0, le=1.0)
     support: float | None = None
     resistance: float | None = None
     notes: str = ""
+    reasoning: str = ""
+    invalidating_condition: str = ""
 
 
 class SentimentOutput(BaseModel):
@@ -53,11 +62,46 @@ class SentimentOutput(BaseModel):
 
 
 class RegimeOutput(BaseModel):
-    """Structured verdict of the market-regime agent."""
+    """Structured verdict of the market-regime agent (spec §13).
+
+    The AI interprets the deterministic regime engine's output — it never
+    calculates or invents market data.
+    """
 
     regime: Regime
+    trend_direction: Literal["up", "down", "flat"] = "flat"
     trend_strength: float = Field(ge=0.0, le=1.0)
+    volatility_state: Literal["expanded", "contracted", "normal"] = "normal"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     notes: str = ""
+    reasoning: str = ""
+
+
+class DxyOutput(BaseModel):
+    """Structured verdict of the DXY context agent (spec §14).
+
+    score is a signed gold-bullish strength in -1..1 (positive = weak
+    dollar = bullish gold). Its sign must agree with gold_bias, and a
+    neutral bias forces score to zero — the LLM cannot smuggle a
+    directional score under a neutral label.
+    """
+
+    gold_bias: Bias
+    score: float = Field(ge=-1.0, le=1.0)
+    dxy_state: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    notes: str = ""
+    reasoning: str = ""
+
+    @model_validator(mode="after")
+    def _sign_agrees_with_bias(self) -> "DxyOutput":
+        if self.gold_bias == Bias.NEUTRAL:
+            self.score = 0.0
+        elif self.gold_bias == Bias.LONG and self.score <= 0:
+            raise ValueError("score must be > 0 when gold_bias is long")
+        elif self.gold_bias == Bias.SHORT and self.score >= 0:
+            raise ValueError("score must be < 0 when gold_bias is short")
+        return self
 
 
 class AgentVerdict(BaseModel):
@@ -67,6 +111,11 @@ class AgentVerdict(BaseModel):
     model: str
     payload: dict
     source: str = "llm"  # "llm" | "fallback"
+    # Set when the LLM call failed and the heuristic fallback was used
+    # (spec §37): TIMEOUT | INVALID_JSON | API_ERROR | RATE_LIMIT |
+    # EMPTY_RESPONSE | UNKNOWN. None = LLM answered or LLM disabled by
+    # configuration (a config state, not a failure).
+    failure_reason: str | None = None
     generated_at: datetime = Field(default_factory=utcnow)
 
 

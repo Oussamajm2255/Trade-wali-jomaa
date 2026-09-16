@@ -121,6 +121,9 @@ def test_snapshot_with_intraday_dxy_candles() -> None:
     assert snap.dxy_context["source"] == "intraday candles"
     assert snap.dxy_context["level"] is not None
     assert snap.dxy_context["change_15m_pct"] is not None
+    # Phase 3: XAUUSD response/divergence computed deterministically (spec §14).
+    assert snap.dxy_context["xau_vs_dxy"] is not None
+    assert "relationship_1h" in snap.dxy_context["xau_vs_dxy"]
 
 
 def test_entry_fetch_failure_raises() -> None:

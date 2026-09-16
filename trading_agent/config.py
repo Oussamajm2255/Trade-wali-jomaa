@@ -142,8 +142,21 @@ class Settings(BaseSettings):
     # --- Signal fusion ---
     weight_technical: float = 0.45
     weight_regime: float = 0.35
-    weight_sentiment: float = 0.20
+    weight_sentiment: float = 0.20  # used by the DXY context agent on gold
     side_threshold: float = 0.25
+
+    # --- AI failure isolation (INTELLIGENCE_V2 — phase 3, spec §37) ---
+    # A failed agent = LLM call failed (TIMEOUT / INVALID_JSON / API_ERROR /
+    # RATE_LIMIT / EMPTY_RESPONSE) and its heuristic fallback was used.
+    # 0 failed = normal, 1 = degraded warning, N >= block_min = no new
+    # proposals. LLM-disabled-by-config is NOT counted as a failure.
+    agent_failure_block_enabled: bool = True
+    agent_failure_block_min: int = 2
+
+    # --- AI reliability tracking (spec §15) ---
+    # Rolling window for per-agent statistics; analysis-only, weights are
+    # never modified from this data.
+    agent_reliability_window: int = 200
 
     @field_validator("symbols", mode="before")
     @classmethod

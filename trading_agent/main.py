@@ -127,11 +127,13 @@ def _print_verdicts(verdicts: dict, snapshot: dict, gauge: dict | None) -> None:
         t2.add_column(col)
     for name, verdict in verdicts.items():
         payload = verdict.payload
-        summary = payload.get("notes", str(payload))[:100]
+        summary = (payload.get("reasoning") or payload.get("notes") or str(payload))[:100]
         if name == "technical":
             headline = f"{payload.get('bias')} (conv {payload.get('conviction')})"
         elif name == "sentiment":
             headline = f"score {payload.get('score')} ({payload.get('tone')})"
+        elif name == "dxy":
+            headline = f"gold {payload.get('gold_bias')} (score {payload.get('score')})"
         else:
             headline = f"{payload.get('regime')} (strength {payload.get('trend_strength')})"
         t2.add_row(name, verdict.source, verdict.model, f"{headline}: {summary}")
@@ -297,6 +299,31 @@ def cmd_positions(_: argparse.Namespace) -> None:
             pos.closed_at.strftime("%Y-%m-%d %H:%M") if pos.closed_at else "-",
         )
     console.print(table)
+
+
+def cmd_agent_stats(args: argparse.Namespace) -> None:
+    """Per-agent reliability stats (spec §15) — analysis-only."""
+    _components()
+    stats = actions.agent_reliability(agent=args.agent, limit=args.limit)
+    agents = stats["agents"]
+    if not agents:
+        console.print("[dim]No agent history yet — run the loop/analyze first.[/]")
+        return
+    table = Table(title=f"AI reliability (rolling {stats['window']} rows — analysis only)", box=box.ROUNDED)
+    for col in ("Agent", "Total", "LLM", "Fallback", "Failures", "Evaluated", "Accuracy", "Avg conf"):
+        table.add_column(col, justify="right")
+    for agent, s in sorted(agents.items()):
+        accuracy = f"{s['accuracy'] * 100:.1f}%" if s["accuracy"] is not None else "-"
+        avg_conf = f"{s['avg_confidence']:.2f}" if s["avg_confidence"] is not None else "-"
+        table.add_row(
+            agent, str(s["total"]), str(s["llm"]), str(s["fallback"]), str(s["failures"]),
+            str(s["evaluated"]), accuracy, avg_conf,
+        )
+    console.print(table)
+    console.print(
+        "[dim]Accuracy is empty until the outcome engine (phase 5) fills actual outcomes. "
+        "Weights are never modified from this data.[/]"
+    )
 
 
 def cmd_history(args: argparse.Namespace) -> None:
@@ -604,6 +631,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_positions = sub.add_parser("positions", help="closed positions with PnL")
     p_positions.set_defaults(func=cmd_positions)
+
+    p_stats = sub.add_parser("agent-stats", help="per-agent AI reliability stats (analysis only)")
+    p_stats.add_argument("--agent", default=None, help="filter to one agent")
+    p_stats.add_argument("--limit", type=int, default=200, help="rolling window size")
+    p_stats.set_defaults(func=cmd_agent_stats)
 
     p_history = sub.add_parser("history", help="recent audit events")
     p_history.add_argument("--limit", type=int, default=30)

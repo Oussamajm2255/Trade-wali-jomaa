@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from trading_agent.schema.types import Side, SignalProposal, utcnow
 from trading_agent.store.db import session_scope
-from trading_agent.store.models import AuditLog, Position, Proposal, RiskState
+from trading_agent.store.models import AgentTrack, AuditLog, Position, Proposal, RiskState
 
 
 def audit(level: str, event: str, detail: dict | None = None) -> None:
@@ -136,6 +136,85 @@ def recent_audit(limit: int = 30) -> list[AuditLog]:
     with session_scope() as session:
         query = select(AuditLog).order_by(AuditLog.ts.desc()).limit(limit)
         return list(session.scalars(query))
+
+
+def record_agent_track(rows: list[dict]) -> None:
+    """Bulk-insert per-agent history rows (spec §15).
+
+    Each row: agent, symbol, timeframe, source, model, prediction,
+    market_regime, confidence, failure_reason, fallback_method.
+    Recording is best-effort: a tracking failure must never kill a cycle.
+    """
+    if not rows:
+        return
+    with session_scope() as session:
+        session.add_all(
+            [
+                AgentTrack(
+                    agent=row["agent"],
+                    symbol=row.get("symbol", ""),
+                    timeframe=row.get("timeframe", ""),
+                    source=row.get("source", "llm"),
+                    model=row.get("model", ""),
+                    prediction=row.get("prediction", {}),
+                    market_regime=row.get("market_regime"),
+                    confidence=row.get("confidence"),
+                    failure_reason=row.get("failure_reason"),
+                    fallback_method=row.get("fallback_method"),
+                )
+                for row in rows
+            ]
+        )
+
+
+def agent_reliability(agent: str | None = None, limit: int = 200) -> dict:
+    """Rolling per-agent statistics over the last `limit` tracked rows.
+
+    Analysis-only (spec §15): accuracy stays None until the outcome engine
+    fills actual outcomes; weights are never modified from this data.
+    """
+    with session_scope() as session:
+        query = select(AgentTrack).order_by(AgentTrack.ts.desc()).limit(limit)
+        if agent:
+            query = query.where(AgentTrack.agent == agent)
+        rows = list(session.scalars(query))
+    by_agent: dict[str, dict] = {}
+    for row in rows:
+        stats = by_agent.setdefault(
+            row.agent,
+            {
+                "total": 0,
+                "llm": 0,
+                "fallback": 0,
+                "failures": 0,
+                "evaluated": 0,
+                "correct": 0,
+                "accuracy": None,
+                "avg_confidence": None,
+            },
+        )
+        stats["total"] += 1
+        if row.source == "llm":
+            stats["llm"] += 1
+        else:
+            stats["fallback"] += 1
+        if row.failure_reason:
+            stats["failures"] += 1
+        if row.correct is not None:
+            stats["evaluated"] += 1
+            if row.correct:
+                stats["correct"] += 1
+    for stats in by_agent.values():
+        if stats["evaluated"]:
+            stats["accuracy"] = round(stats["correct"] / stats["evaluated"], 4)
+        confs = [
+            r.confidence
+            for r in rows
+            if r.confidence is not None and by_agent.get(r.agent) is stats
+        ]
+        if confs:
+            stats["avg_confidence"] = round(sum(confs) / len(confs), 4)
+    return {"window": limit, "agents": by_agent}
 
 
 def _to_signal(row: Proposal) -> SignalProposal:

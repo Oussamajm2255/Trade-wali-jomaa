@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from trading_agent.config import Settings
 from trading_agent.data.alignment import classify_alignment
 from trading_agent.data.bias import compute_htf_bias
-from trading_agent.data.dxy_context import compute_dxy_context
+from trading_agent.data.dxy_context import compute_dxy_context, xau_vs_dxy
 from trading_agent.data.gold_context import compute_gold_context
 from trading_agent.data.indicators import adx, atr, build_snapshot, ema, rsi
 from trading_agent.data.market import MarketDataError
@@ -268,6 +268,11 @@ def build_market_snapshot(
         except Exception as exc:  # noqa: BLE001 - falls back to gauge-only
             logger.warning("intraday DXY candles unavailable: %s", exc)
     snap.dxy_context = compute_dxy_context(dxy_df, snap.dxy)
+    if dxy_df is not None and snap.dxy_context is not None:
+        try:
+            snap.dxy_context["xau_vs_dxy"] = xau_vs_dxy(snap.candles[entry_tf], dxy_df)
+        except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+            logger.warning("xau_vs_dxy failed: %s", exc)
 
     qualities.append(validate_indicators(snap.indicators[entry_tf]))
 

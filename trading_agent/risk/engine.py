@@ -253,7 +253,7 @@ class RiskEngine:
     def _rationale(verdicts: dict[str, AgentVerdict], gauge: dict | None) -> str:
         parts = []
         for name, verdict in verdicts.items():
-            notes = verdict.payload.get("notes", "")
+            notes = verdict.payload.get("reasoning") or verdict.payload.get("notes", "")
             parts.append(f"[{name}] {notes}")
         if gauge:
             label = gauge.get("source", "sentiment gauge")

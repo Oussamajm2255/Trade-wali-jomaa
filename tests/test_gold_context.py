@@ -34,7 +34,8 @@ def test_daily_and_weekly_opens() -> None:
     expected_open = entry_df()[entry_df().index >= day_start]["open"].iloc[0]
     assert ctx["daily_open"] == expected_open
     assert ctx["weekly_open"] is not None
-    assert ctx["price"] > ctx["daily_open"]  # rising synthetic series
+    # Rising synthetic series; equality only in the day's first candle.
+    assert ctx["price"] >= ctx["daily_open"]
 
 
 def test_previous_day_levels() -> None:

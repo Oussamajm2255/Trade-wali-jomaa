@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from trading_agent.data.dxy_context import compute_dxy_context
+from trading_agent.data.dxy_context import compute_dxy_context, xau_vs_dxy
 
 
 def dxy_df(n: int = 100, freq: str = "15min", slope: float = 0.0) -> pd.DataFrame:
@@ -66,3 +66,37 @@ def test_changes_follow_candle_granularity() -> None:
     assert ctx_1h["change_15m_pct"] is None  # 1h frame cannot honestly claim 15m
     assert ctx_1h["change_1h_pct"] is not None
     assert ctx_1h["change_4h_pct"] is not None
+
+
+# --- XAUUSD response / divergence (spec §14) ---
+
+
+def test_xau_vs_dxy_inverse_relationship() -> None:
+    gold = dxy_df(freq="15min", slope=3.0)  # gold rising
+    dollar = dxy_df(freq="15min", slope=-0.3)  # dollar falling
+    out = xau_vs_dxy(gold, dollar)
+    assert out["gold_1h_pct"] is not None and out["gold_1h_pct"] > 0
+    assert out["dxy_1h_pct"] is not None and out["dxy_1h_pct"] < 0
+    assert out["relationship_1h"] == "inverse"  # typical for gold
+    assert out["divergence"] is False
+
+
+def test_xau_vs_dxy_direct_relationship_flags_divergence() -> None:
+    gold = dxy_df(freq="15min", slope=3.0)
+    dollar = dxy_df(freq="15min", slope=0.3)
+    out = xau_vs_dxy(gold, dollar)
+    assert out["relationship_1h"] == "direct"  # both up = unusual
+    assert out["divergence"] is True
+
+
+def test_xau_vs_dxy_flat_when_no_movement() -> None:
+    gold = dxy_df(freq="15min", slope=0.0)
+    dollar = dxy_df(freq="15min", slope=0.0)
+    out = xau_vs_dxy(gold, dollar)
+    assert out["relationship_1h"] == "flat"
+    assert out["divergence"] is False
+
+
+def test_xau_vs_dxy_none_without_frames() -> None:
+    assert xau_vs_dxy(None, None) is None
+    assert xau_vs_dxy(pd.DataFrame(), dxy_df()) is None
