@@ -9,11 +9,16 @@ proposals (configurable).
 Phase 4 (spec §16-§21): fusion returns a signed direction_score plus
 raw_confidence and per-agent contributions; the deterministic setup
 quality / conflict / calibration context is assembled by the fusion
-layer and handed to the risk engine with every candidate."""
+layer and handed to the risk engine with every candidate.
+
+Phase 5 (spec §22): every cycle — proposal or rejection — is persisted
+as one complete signal record: snapshot, AI outputs, fusion, setup
+quality, conflicts and the full gate trail."""
 from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Callable
 
 from trading_agent.agents.base import LLMClient
@@ -26,14 +31,16 @@ from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.quality import QualityState
 from trading_agent.data.snapshot import MarketSnapshot, build_market_snapshot
 from trading_agent.fusion.engine import build_fusion_context, fuse_verdicts
-from trading_agent.fusion.types import FusionResult
+from trading_agent.fusion.types import FusionContext, FusionResult
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import (
     AgentVerdict,
     Rejection,
     SignalProposal,
+    utcnow,
 )
 from trading_agent.store import actions
+from trading_agent.versioning import version_stamp
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +111,13 @@ class Orchestrator:
         """
         return fuse_verdicts(verdicts, self.settings)
 
-    def _record_tracks(self, verdicts: dict[str, AgentVerdict], snap: MarketSnapshot) -> None:
+    def _record_tracks(
+        self,
+        verdicts: dict[str, AgentVerdict],
+        snap: MarketSnapshot,
+        signal_id: str | None,
+        now: datetime | None,
+    ) -> None:
         """Reliability tracking (spec §15) — analysis-only, best-effort."""
         regime_label = (snap.regimes.get(snap.entry_timeframe) or {}).get("regime")
         rows = []
@@ -119,6 +132,7 @@ class Orchestrator:
             )
             rows.append(
                 {
+                    "ts": now or utcnow(),
                     "agent": name,
                     "symbol": snap.symbol,
                     "timeframe": snap.entry_timeframe,
@@ -129,6 +143,7 @@ class Orchestrator:
                     "confidence": confidence,
                     "failure_reason": verdict.failure_reason,
                     "fallback_method": "heuristic" if verdict.source == "fallback" else None,
+                    "signal_id": signal_id,
                 }
             )
         try:
@@ -137,17 +152,68 @@ class Orchestrator:
             logger.warning("agent reliability tracking failed: %s", exc)
 
     def run_full(
-        self, symbol: str, timeframe: str | None = None
+        self,
+        symbol: str,
+        timeframe: str | None = None,
+        now: datetime | None = None,
     ) -> tuple[SignalProposal | Rejection, dict[str, AgentVerdict], dict, dict | None]:
-        """Full pipeline; also returns verdicts/snapshot/gauge for reporting."""
+        """Full pipeline; also returns verdicts/snapshot/gauge for reporting.
+
+        Phase 5 (spec §22): every cycle — proposal or rejection — is
+        stored as one complete signal record. `now` anchors all
+        timestamps (historical replays).
+        """
         timeframe = timeframe or self.settings.timeframe
+        try:
+            signal_id = actions.next_signal_id(symbol, now)
+        except Exception as exc:  # noqa: BLE001 - recording must never kill the cycle
+            logger.warning("signal id generation failed: %s", exc)
+            signal_id = None
+        result, verdicts, entry, gauge, snap, fusion_context, gates = self._run_pipeline(
+            symbol, timeframe, signal_id, now
+        )
+        if signal_id:
+            if isinstance(result, (SignalProposal, Rejection)):
+                result.signal_id = signal_id
+            self._record_signal(
+                signal_id, symbol, timeframe, result, snap, verdicts, entry,
+                fusion_context, gates, now,
+            )
+        return result, verdicts, entry, gauge
+
+    def _run_pipeline(
+        self,
+        symbol: str,
+        timeframe: str,
+        signal_id: str | None,
+        now: datetime | None,
+    ) -> tuple[
+        SignalProposal | Rejection,
+        dict[str, AgentVerdict],
+        dict,
+        dict | None,
+        MarketSnapshot | None,
+        FusionContext | None,
+        list[dict],
+    ]:
+        """Analysis pipeline; every gate decision lands in the trail."""
+        gates: list[dict] = []
         # One coherent snapshot per cycle (spec §3): entry TF + higher TFs,
         # each validated. FAIL stops the cycle before any AI call (§4/§48).
         try:
-            snap = build_market_snapshot(self.market, symbol, self.settings, timeframe)
+            snap = build_market_snapshot(
+                self.market, symbol, self.settings, timeframe, now=now
+            )
         except MarketDataError as exc:
             logger.error("market data unavailable for %s: %s", symbol, exc)
-            return Rejection(symbol=symbol, reason=f"market data unavailable: {exc}"), {}, {}, None
+            gates.append(
+                {"gate": "market_data", "status": "reject", "detail": str(exc)}
+            )
+            return (
+                Rejection(symbol=symbol, reason=f"market data unavailable: {exc}"),
+                {}, {}, None, None, None, gates,
+            )
+        gates.append({"gate": "market_data", "status": "pass"})
         htf_tf = (
             self.settings.htf_timeframe
             if self.settings.htf_bias_filter_enabled and timeframe != self.settings.htf_timeframe
@@ -155,31 +221,38 @@ class Orchestrator:
         )
         entry = snap.entry_snapshot_for_llm(htf_tf)
         if snap.quality_state == QualityState.FAIL:
+            gates.append(
+                {"gate": "data_quality", "status": "reject", "detail": "; ".join(snap.quality_issues[:3])}
+            )
             return (
                 Rejection(symbol=symbol, reason=f"data quality FAIL: {'; '.join(snap.quality_issues[:3])}"),
-                {},
-                entry,
-                snap.dxy,
+                {}, entry, snap.dxy, snap, None, gates,
             )
         if snap.degraded and not self.settings.data_quality_allow_degraded:
+            gates.append(
+                {"gate": "data_quality", "status": "reject", "detail": "; ".join(snap.quality_issues[:3])}
+            )
             return (
                 Rejection(
                     symbol=symbol,
                     reason=f"data quality DEGRADED (blocked by config): {'; '.join(snap.quality_issues[:3])}",
                 ),
-                {},
-                entry,
-                snap.dxy,
+                {}, entry, snap.dxy, snap, None, gates,
             )
+        gates.append({"gate": "data_quality", "status": "pass"})
 
         # The bias gate's source is the canonical snapshot (fail-closed above).
         htf_bias = snap.biases.get(self.settings.htf_timeframe) if htf_tf else None
         verdicts = self._run_agents(entry, snap.dxy)
         if not verdicts:
-            return Rejection(symbol=symbol, reason="all analysis agents failed"), verdicts, entry, snap.dxy
+            gates.append({"gate": "agents", "status": "reject", "detail": "all analysis agents failed"})
+            return (
+                Rejection(symbol=symbol, reason="all analysis agents failed"),
+                verdicts, entry, snap.dxy, snap, None, gates,
+            )
 
         # AI reliability tracking (spec §15): every verdict, every cycle.
-        self._record_tracks(verdicts, snap)
+        self._record_tracks(verdicts, snap, signal_id, now)
 
         # Fallback isolation (spec §37): too many failed agents = no new
         # proposals. One failure degrades loudly but keeps the cycle.
@@ -192,7 +265,12 @@ class Orchestrator:
                 logger.warning("degraded: agent(s) fell back: %s", failed)
                 actions.audit("WARNING", "agent_degraded", {"failed": failed})
         if block_reason:
-            return Rejection(symbol=symbol, reason=block_reason), verdicts, entry, snap.dxy
+            gates.append({"gate": "agents", "status": "reject", "detail": block_reason})
+            return (
+                Rejection(symbol=symbol, reason=block_reason),
+                verdicts, entry, snap.dxy, snap, None, gates,
+            )
+        gates.append({"gate": "agents", "status": "pass"})
 
         # Deterministic fusion context (spec §16-§21): setup quality,
         # conflict report and confidence calibration — the risk engine's
@@ -212,8 +290,80 @@ class Orchestrator:
             htf_bias=htf_bias,
             context=snap.context_for_risk(),
             fusion_context=fusion_context,
+            trail=gates,
+            now=now,
         )
-        return result, verdicts, entry, snap.dxy
+        return result, verdicts, entry, snap.dxy, snap, fusion_context, gates
+
+    def _record_signal(
+        self,
+        signal_id: str,
+        symbol: str,
+        timeframe: str,
+        result: SignalProposal | Rejection,
+        snap: MarketSnapshot | None,
+        verdicts: dict[str, AgentVerdict],
+        entry: dict,
+        fusion_context: FusionContext | None,
+        gates: list[dict],
+        now: datetime | None,
+    ) -> None:
+        """Persist one complete signal record (spec §22), best-effort.
+
+        Proposals AND rejections are stored: the robot remembers the
+        opportunities it refused, not only the trades it took.
+        """
+        versions = snap.versions if snap else version_stamp()
+        market_snapshot = dict(entry) if snap else {"error": "market data unavailable"}
+        if snap:
+            market_snapshot["dxy_gauge"] = snap.dxy
+            market_snapshot["price"] = snap.price
+        record: dict = {
+            "signal_id": signal_id,
+            "ts": now or utcnow(),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "strategy_version": versions.get("strategy_version", ""),
+            "config_version": versions.get("config_version", ""),
+            "prompt_version": versions.get("prompt_version", ""),
+            "market_snapshot": market_snapshot,
+            "ai_outputs": {name: v.model_dump(mode="json") for name, v in verdicts.items()},
+            "fusion": {},
+            "setup_quality": None,
+            "conflicts": None,
+            "gates": gates,
+            "final_decision": "rejected",
+            "decision_reason": None,
+            "no_trade_reason": None,
+        }
+        if fusion_context:
+            record["fusion"] = {
+                "direction_score": fusion_context.fusion.direction_score,
+                "raw_confidence": fusion_context.fusion.raw_confidence,
+                "contributions": fusion_context.fusion.contributions,
+                "calibrated_confidence": fusion_context.calibrated_confidence,
+                "regime": fusion_context.regime,
+                "spread_pct": fusion_context.spread_pct,
+            }
+            record["setup_quality"] = fusion_context.setup_quality.model_dump()
+            record["conflicts"] = fusion_context.conflict.model_dump()
+        if isinstance(result, SignalProposal):
+            record.update(
+                final_decision="proposal",
+                sl=result.stop,
+                tp=result.target,
+                risk_amount=result.risk_amount,
+                size=result.size,
+            )
+        else:
+            record.update(
+                decision_reason=result.reason,
+                no_trade_reason=getattr(result, "no_trade_reason", None),
+            )
+        try:
+            actions.record_signal(record)
+        except Exception as exc:  # noqa: BLE001 - recording must never kill the cycle
+            logger.warning("signal recording failed for %s: %s", signal_id, exc)
 
     def run(self, symbol: str, timeframe: str | None = None) -> SignalProposal | Rejection:
         return self.run_full(symbol, timeframe)[0]

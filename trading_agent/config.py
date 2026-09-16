@@ -193,6 +193,14 @@ class Settings(BaseSettings):
     calibration_min_samples: int = 50
     calibration_min_per_bin: int = 10
 
+    # --- Historical backtesting (INTELLIGENCE_V2 — phase 5, spec §24/§25) ---
+    # Candle-by-candle replay of the full pipeline on pre-fetched history.
+    # Deterministic AI mode: the backtest always runs without an API key
+    # (heuristic fallbacks), so results are reproducible and offline.
+    backtest_history_limit: int = 5000  # candles fetched per timeframe
+    backtest_db_url: str = "sqlite:///backtest.db"  # isolated risk/DB state
+    backtest_spread_pct: float = 0.0  # round-trip spread (half paid each side)
+
     @field_validator("symbols", mode="before")
     @classmethod
     def _normalise_symbols(cls, value: object) -> str:

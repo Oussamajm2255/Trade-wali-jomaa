@@ -34,11 +34,11 @@ class RiskEngine:
 
     # ------------------------------------------------------------------ state
 
-    def _get_or_create_state(self, session: Session) -> RiskState:
+    def _get_or_create_state(self, session: Session, now: datetime | None = None) -> RiskState:
         state = session.get(RiskState, 1)
         if state is None:
             equity = self.s.paper_starting_equity
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
             state = RiskState(
                 id=1,
                 equity=equity,
@@ -49,12 +49,12 @@ class RiskEngine:
             )
             session.add(state)
             session.flush()
-        self._roll_day(state)
+        self._roll_day(state, now)
         return state
 
     @staticmethod
-    def _roll_day(state: RiskState) -> None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def _roll_day(state: RiskState, now: datetime | None = None) -> None:
+        today = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
         if state.day != today:
             state.start_of_day_equity = state.equity
             state.day = today
@@ -107,13 +107,14 @@ class RiskEngine:
                 AuditLog(level="WARNING", event="kill_switch_reset", detail={})
             )
 
-    def realize_pnl(self, session: Session, pnl: float) -> None:
+    def realize_pnl(self, session: Session, pnl: float, now: datetime | None = None) -> None:
         """Apply realised PnL to equity, update peak, enforce limits.
 
         Runs inside the caller's session/transaction — the caller owns
         commit/rollback (the paper broker calls this within session_scope).
+        `now` lets historical replays roll the daily-loss day correctly.
         """
-        state = self._get_or_create_state(session)
+        state = self._get_or_create_state(session, now)
         state.equity = round(state.equity + pnl, 8)
         state.peak_equity = max(state.peak_equity, state.equity)
         self._enforce_limits(session, state)
@@ -145,17 +146,38 @@ class RiskEngine:
         htf_bias: dict | None = None,
         context: dict | None = None,
         fusion_context: FusionContext | None = None,
+        trail: list[dict] | None = None,
+        now: datetime | None = None,
     ) -> SignalProposal | Rejection:
-        """Apply every hard gate; return a proposal or a logged rejection."""
+        """Apply every hard gate; return a proposal or a logged rejection.
+
+        `trail` (optional) collects every gate decision as
+        {"gate", "status", "detail"} so the signal record (spec §22) can
+        store the full gate trail. `now` anchors day rollover and
+        timestamps for historical replays (backtesting).
+        """
+
+        def mark(gate: str, status: str, detail: str = "") -> None:
+            if trail is not None:
+                trail.append({"gate": gate, "status": status, "detail": detail})
+
         with session_scope() as session:
-            state = self._get_or_create_state(session)
+            state = self._get_or_create_state(session, now)
             self._enforce_limits(session, state)
 
             if state.halted:
-                return Rejection(symbol=symbol, reason=f"kill-switch engaged: {state.halt_reason}")
+                reason = f"kill-switch engaged: {state.halt_reason}"
+                mark("kill_switch", "reject", reason)
+                return Rejection(symbol=symbol, reason=reason)
             if side == Side.NEUTRAL:
+                mark("side", "reject", "fused signal is neutral")
                 return Rejection(symbol=symbol, reason="fused signal is neutral")
             if confidence < self.s.min_confidence:
+                mark(
+                    "confidence",
+                    "reject",
+                    f"confidence {confidence:.2f} below minimum {self.s.min_confidence}",
+                )
                 return Rejection(
                     symbol=symbol,
                     reason=f"confidence {confidence:.2f} below minimum {self.s.min_confidence}",
@@ -165,6 +187,7 @@ class RiskEngine:
             # --- No-trade gates (spec §20), fusion-layer inputs. ---
             no_trade = self._no_trade_rejection(symbol, fusion_context)
             if no_trade:
+                mark("no_trade", "reject", f"{no_trade.no_trade_reason or 'no_trade'}: {no_trade.reason}")
                 return no_trade
 
             # DXY concurrency hard gate (gold): the dollar must agree with
@@ -172,47 +195,49 @@ class RiskEngine:
             if self.s.dxy_filter_enabled and gauge and gauge.get("kind") == "dxy":
                 value = float(gauge["value"])
                 if side == Side.LONG and value < self.s.dxy_long_min:
-                    return Rejection(
-                        symbol=symbol,
-                        reason=(
-                            f"DXY concurrency: gauge {value:.0f} not weak-dollar "
-                            f"(need >= {self.s.dxy_long_min:.0f}) for a LONG"
-                        ),
+                    reason = (
+                        f"DXY concurrency: gauge {value:.0f} not weak-dollar "
+                        f"(need >= {self.s.dxy_long_min:.0f}) for a LONG"
                     )
+                    mark("dxy_concurrency", "reject", reason)
+                    return Rejection(symbol=symbol, reason=reason)
                 if side == Side.SHORT and value > self.s.dxy_short_max:
-                    return Rejection(
-                        symbol=symbol,
-                        reason=(
-                            f"DXY concurrency: gauge {value:.0f} not strong-dollar "
-                            f"(need <= {self.s.dxy_short_max:.0f}) for a SHORT"
-                        ),
+                    reason = (
+                        f"DXY concurrency: gauge {value:.0f} not strong-dollar "
+                        f"(need <= {self.s.dxy_short_max:.0f}) for a SHORT"
                     )
+                    mark("dxy_concurrency", "reject", reason)
+                    return Rejection(symbol=symbol, reason=reason)
+            mark("dxy_concurrency", "pass")
             # HTF bias hard gate (multi-timeframe): the 4h trend must agree
             # with the entry direction; a choppy HTF blocks both sides.
             if self.s.htf_bias_filter_enabled and htf_bias:
                 bias = htf_bias.get("bias")
                 if side == Side.LONG and bias != "bull":
-                    return Rejection(
-                        symbol=symbol,
-                        reason=(
-                            f"HTF bias: {bias} on {self.s.htf_timeframe} blocks LONG "
-                            f"({htf_bias.get('detail', '')})"
-                        ),
+                    reason = (
+                        f"HTF bias: {bias} on {self.s.htf_timeframe} blocks LONG "
+                        f"({htf_bias.get('detail', '')})"
                     )
+                    mark("htf_bias", "reject", reason)
+                    return Rejection(symbol=symbol, reason=reason)
                 if side == Side.SHORT and bias != "bear":
-                    return Rejection(
-                        symbol=symbol,
-                        reason=(
-                            f"HTF bias: {bias} on {self.s.htf_timeframe} blocks SHORT "
-                            f"({htf_bias.get('detail', '')})"
-                        ),
+                    reason = (
+                        f"HTF bias: {bias} on {self.s.htf_timeframe} blocks SHORT "
+                        f"({htf_bias.get('detail', '')})"
                     )
+                    mark("htf_bias", "reject", reason)
+                    return Rejection(symbol=symbol, reason=reason)
+            mark("htf_bias", "pass")
             open_positions = list(session.scalars(select(Position).where(Position.status == "open")))
             if any(p.symbol == symbol for p in open_positions):
+                mark("positions", "reject", "position already open for this symbol")
                 return Rejection(symbol=symbol, reason="position already open for this symbol")
             if len(open_positions) >= self.s.max_positions:
+                mark("positions", "reject", f"max positions reached ({self.s.max_positions})")
                 return Rejection(symbol=symbol, reason=f"max positions reached ({self.s.max_positions})")
+            mark("positions", "pass")
             if atr <= 0 or price <= 0:
+                mark("sizing", "reject", "invalid price/ATR for sizing")
                 return Rejection(symbol=symbol, reason="invalid price/ATR for sizing")
 
             exposure = sum(p.size * p.entry for p in open_positions)
@@ -225,6 +250,11 @@ class RiskEngine:
             if size * price > allowed:
                 size = max(0.0, allowed / price)
             if size * price < MIN_NOTIONAL:
+                mark(
+                    "notional",
+                    "reject",
+                    f"position notional {size * price:.2f} below floor {MIN_NOTIONAL}",
+                )
                 return Rejection(
                     symbol=symbol,
                     reason=f"position notional {size * price:.2f} below floor {MIN_NOTIONAL}",
@@ -240,7 +270,7 @@ class RiskEngine:
             models = sorted({v.model for v in verdicts.values()})
             rationale = self._rationale(verdicts, gauge)
             evidence = {
-                "verdicts": {name: v.model_dump() for name, v in verdicts.items()},
+                "verdicts": {name: v.model_dump(mode="json") for name, v in verdicts.items()},
                 "sentiment_gauge": gauge,
                 "atr": atr,
             }
@@ -255,6 +285,7 @@ class RiskEngine:
                     "conflict": fusion_context.conflict.model_dump(),
                     "calibrated_confidence": fusion_context.calibrated_confidence,
                 }
+            mark("final", "pass", "proposal approved by risk engine")
             return SignalProposal(
                 symbol=symbol,
                 timeframe=timeframe,

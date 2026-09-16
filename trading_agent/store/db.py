@@ -45,9 +45,25 @@ def _migrate_sqlite(engine: Engine) -> None:
     if engine.url.get_backend_name() != "sqlite":
         return
     with engine.begin() as conn:
+        # Phase 1: broker ticket for live (MT5) positions.
         columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(positions)")}
         if columns and "broker_ticket" not in columns:
             conn.exec_driver_sql("ALTER TABLE positions ADD COLUMN broker_ticket INTEGER")
+        # Phase 5 (§23): outcome-engine tracking on positions.
+        additive = [
+            ("mfe_price", "FLOAT"),
+            ("mae_price", "FLOAT"),
+            ("bars_open", "INTEGER DEFAULT 0"),
+            ("outcome", "VARCHAR(16)"),
+            ("r_multiple", "FLOAT"),
+        ]
+        for name, sqltype in additive:
+            if columns and name not in columns:
+                conn.exec_driver_sql(f"ALTER TABLE positions ADD COLUMN {name} {sqltype}")
+        # Phase 5 (§22): cycle link on agent tracks.
+        track_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(agent_track)")}
+        if track_columns and "signal_id" not in track_columns:
+            conn.exec_driver_sql("ALTER TABLE agent_track ADD COLUMN signal_id VARCHAR(24)")
 
 
 def _seed_risk_state() -> None:

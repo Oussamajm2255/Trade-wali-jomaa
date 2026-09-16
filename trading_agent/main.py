@@ -6,7 +6,10 @@ Commands (paper mode):
   approve ID               approve a pending proposal -> opens a paper position
   reject ID [--reason]     reject a pending proposal
   status                   equity, risk state, open positions, pending proposals
-  positions                open positions
+  positions                closed positions (with outcome metrics)
+  signals [--symbol]       recent complete signal records (spec §22)
+  signal ID                one full signal record with gate trail
+  backtest SYMBOL [--tf]   candle-by-candle historical replay (deterministic)
   history [--limit N]      recent audit events
   reset-halt               clear the kill-switch after manual review
   loop [--symbols ...]     continuous paper trading loop (stop/target mgmt + proposals)
@@ -29,6 +32,7 @@ from rich.table import Table
 
 from trading_agent.agents.base import LLMClient
 from trading_agent.agents.orchestrator import Orchestrator, llm_degraded
+from trading_agent.backtest.engine import BacktestEngine, BacktestError
 from trading_agent.config import Settings, get_settings
 from trading_agent.data.gold import GoldData, GoldDataError
 from trading_agent.data.market import MarketData, MarketDataError
@@ -211,6 +215,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                        "no_trade_reason": result.no_trade_reason})
         return
     proposal_id = actions.save_proposal(result)
+    actions.link_signal_proposal(result.signal_id, proposal_id)
     if args.json:
         console.print_json(result.model_dump())
     _print_proposal(result, pending_id=proposal_id)
@@ -311,17 +316,172 @@ def cmd_positions(_: argparse.Namespace) -> None:
     _components()
     closed = actions.closed_positions(limit=20)
     table = Table(title="Closed positions", box=box.ROUNDED)
-    for col in ("ID", "Symbol", "Side", "Exit Price", "Reason", "PnL", "Closed (UTC)"):
+    for col in ("ID", "Symbol", "Side", "Exit", "Reason", "Outcome", "R", "PnL", "Closed (UTC)"):
         table.add_column(col)
     for pos in closed:
         table.add_row(
             str(pos.id), pos.symbol, pos.side.upper(),
             f"{pos.exit_price:,.8g}" if pos.exit_price else "-",
             pos.exit_reason or "-",
+            pos.outcome or "-",
+            f"{pos.r_multiple:+.2f}" if pos.r_multiple is not None else "-",
             f"{pos.pnl:+,.2f}" if pos.pnl is not None else "-",
             pos.closed_at.strftime("%Y-%m-%d %H:%M") if pos.closed_at else "-",
         )
     console.print(table)
+
+
+def cmd_signals(args: argparse.Namespace) -> None:
+    """Recent complete signal records — proposals AND rejections (§22)."""
+    if args.db:
+        init_engine(args.db)
+    _components()
+    rows = actions.list_signals(limit=args.limit, symbol=args.symbol, decision=args.decision)
+    if not rows:
+        console.print("[dim]No signal records yet — run analyze/loop first.[/]")
+        return
+    table = Table(title="Signal records", box=box.ROUNDED)
+    for col in ("Signal ID", "UTC", "Symbol", "TF", "Decision", "Outcome", "Conf."):
+        table.add_column(col)
+    for row in rows:
+        fusion = row.fusion if isinstance(row.fusion, dict) else {}
+        conf = fusion.get("raw_confidence")
+        table.add_row(
+            row.signal_id,
+            row.ts.strftime("%m-%d %H:%M") if row.ts else "-",
+            row.symbol,
+            row.timeframe,
+            row.final_decision,
+            row.outcome or "-",
+            f"{conf:.2f}" if conf is not None else "-",
+        )
+    console.print(table)
+
+
+def cmd_signal(args: argparse.Namespace) -> None:
+    """One full signal record: snapshot, fusion, setup quality, gate trail."""
+    if args.db:
+        init_engine(args.db)
+    _components()
+    row = actions.get_signal(args.signal_id)
+    if row is None:
+        console.print(f"[red]Signal {args.signal_id} not found.[/]")
+        sys.exit(1)
+    fusion = row.fusion if isinstance(row.fusion, dict) else {}
+    style = "green" if row.final_decision == "proposal" else "yellow"
+    console.print(Panel.fit(
+        f"[bold]{row.signal_id}[/] {row.symbol} {row.timeframe} — "
+        f"[bold {style}]{row.final_decision}[/]"
+        + (f" (outcome {row.outcome}, R {row.r_multiple:+.2f})" if row.outcome else "")
+        + f"\nstrategy {row.strategy_version} | config {row.config_version} | "
+        f"prompts {row.prompt_version}\n"
+        + (f"confidence {fusion.get('raw_confidence')}" if fusion.get("raw_confidence") is not None else "")
+        + (f" | direction {fusion.get('direction_score'):+.2f}" if fusion.get("direction_score") is not None else "")
+        + (f" | calibrated {fusion.get('calibrated_confidence')}" if fusion.get("calibrated_confidence") is not None else "")
+        + "\n"
+        + (f"SL {row.sl:,.8g} | TP {row.tp:,.8g} | size {row.size:,.8g} | risk {row.risk_amount:.2f} USD\n" if row.final_decision == "proposal" else "")
+        + f"reason: {row.decision_reason or '-'}\n"
+        + f"no-trade class: {row.no_trade_reason or '-'}",
+        title="Signal record",
+        border_style=style,
+    ))
+    gates = row.gates if isinstance(row.gates, list) else []
+    if gates:
+        t = Table(title="Gate trail", box=box.ROUNDED)
+        for col in ("Gate", "Status", "Detail"):
+            t.add_column(col)
+        for g in gates:
+            t.add_row(
+                g.get("gate", "-"), g.get("status", "-"), str(g.get("detail", ""))[:70]
+            )
+        console.print(t)
+    snap = row.market_snapshot if isinstance(row.market_snapshot, dict) else {}
+    if snap.get("price"):
+        console.print(
+            f"[dim]price {snap['price']:,.8g} | regime {snap.get('regime', {}).get('regime', 'n/a')} "
+            f"| quality {snap.get('data_quality', 'n/a')} | source {snap.get('data_source', 'n/a')}[/]"
+        )
+    else:
+        console.print(f"[dim]snapshot: {snap.get('error', 'unavailable')}[/]")
+
+
+def cmd_backtest(args: argparse.Namespace) -> None:
+    """Candle-by-candle historical replay (spec §24) — deterministic AI."""
+    settings = get_settings()
+    symbol = args.symbol
+    tf = args.tf or settings.timeframe
+    market = _market_for(settings, symbol)
+    limit = args.limit or settings.backtest_history_limit
+    tfs = [tf] + [t for t in settings.snapshot_timeframes if t != tf]
+    frames: dict = {}
+    for t in tfs:
+        try:
+            frames[t] = market.fetch_ohlcv(symbol, t, limit)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 - one missing TF degrades like live
+            logger.warning("backtest frame %s unavailable: %s", t, exc)
+    if tf not in frames:
+        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
+        sys.exit(1)
+    dxy = None
+    if hasattr(market, "dxy_ohlcv"):
+        try:
+            dxy = market.dxy_ohlcv("1h", limit)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 - gauge/context degrade like live
+            logger.warning("backtest DXY history unavailable: %s", exc)
+    engine = BacktestEngine(
+        settings=settings,
+        frames=frames,
+        symbol=symbol,
+        timeframe=tf,
+        dxy_frames=dxy,
+        start=args.start,
+        end=args.end,
+        db_url=args.db,
+        spread_pct=args.spread,
+        warmup=args.warmup,
+    )
+    try:
+        report = engine.run()
+    except BacktestError as exc:
+        console.print(f"[red]{exc}[/]")
+        sys.exit(1)
+    _print_backtest(report, args.json)
+
+
+def _print_backtest(report, as_json: bool = False) -> None:
+    if as_json:
+        console.print_json(report.to_dict())
+        return
+    stats = report.stats
+    console.print(Panel.fit(
+        f"[bold]{report.symbol} {report.timeframe}[/] {report.start_ts} -> {report.end_ts} "
+        f"({report.candles} candles)\n"
+        f"trades {stats['trades']} | wins {stats['wins']} | losses {stats['losses']} | "
+        f"win rate {stats['win_rate']}\n"
+        f"profit factor {stats['profit_factor']} | expectancy {stats['expectancy_r']} R | "
+        f"total PnL {stats['total_pnl']:+,.2f} USD\n"
+        f"max drawdown {stats['max_drawdown_pct']}% | final equity {stats['final_equity']:,.2f}",
+        title=f"Backtest — deterministic AI (DB: {report.db_url})",
+    ))
+    for halt in report.halt_events:
+        console.print(f"[bold red]KILL-SWITCH at {halt['ts']}: {halt['reason']}[/]")
+    if report.trades:
+        table = Table(title="Trades", box=box.ROUNDED)
+        for col in ("Signal", "Side", "Entry", "Exit", "Reason", "Outcome", "R", "PnL", "Bars"):
+            table.add_column(col)
+        for t in report.trades:
+            table.add_row(
+                (t.signal_id or "-")[-14:],
+                t.side.upper(),
+                f"{t.entry:,.8g}" if t.entry else "-",
+                f"{t.exit_price:,.8g}" if t.exit_price else "-",
+                t.exit_reason or "-",
+                t.outcome or "-",
+                f"{t.r_multiple:+.2f}" if t.r_multiple is not None else "-",
+                f"{t.pnl:+,.2f}" if t.pnl is not None else "-",
+                str(t.bars_open),
+            )
+        console.print(table)
 
 
 def cmd_agent_stats(args: argparse.Namespace) -> None:
@@ -600,6 +760,7 @@ def cmd_loop(args: argparse.Namespace) -> None:
                     )
                     continue
                 proposal_id = actions.save_proposal(result)
+                actions.link_signal_proposal(result.signal_id, proposal_id)
                 console.print(
                     f"[bold]{symbol}: new {result.side.value.upper()} proposal "
                     f"(confidence {result.confidence:.2f}) — ID {proposal_id}[/]"
@@ -652,8 +813,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="account, positions, pending proposals")
     p_status.set_defaults(func=cmd_status)
 
-    p_positions = sub.add_parser("positions", help="closed positions with PnL")
+    p_positions = sub.add_parser("positions", help="closed positions with outcome metrics")
     p_positions.set_defaults(func=cmd_positions)
+
+    p_signals = sub.add_parser("signals", help="recent complete signal records (spec §22)")
+    p_signals.add_argument("--symbol", default=None, help="filter by symbol")
+    p_signals.add_argument("--decision", default=None, choices=["proposal", "rejected"], help="filter by final decision")
+    p_signals.add_argument("--limit", type=int, default=50)
+    p_signals.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
+    p_signals.set_defaults(func=cmd_signals)
+
+    p_signal = sub.add_parser("signal", help="one full signal record with gate trail")
+    p_signal.add_argument("signal_id")
+    p_signal.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
+    p_signal.set_defaults(func=cmd_signal)
+
+    p_backtest = sub.add_parser("backtest", help="candle-by-candle historical replay (deterministic)")
+    p_backtest.add_argument("symbol")
+    p_backtest.add_argument("--tf", default=None, help="timeframe override, e.g. 15m/1h/4h")
+    p_backtest.add_argument("--start", default=None, help="ISO start (default: earliest data)")
+    p_backtest.add_argument("--end", default=None, help="ISO end (default: latest data)")
+    p_backtest.add_argument("--limit", type=int, default=None, help="candles fetched per timeframe")
+    p_backtest.add_argument("--db", default=None, help="isolated backtest DB (default: BACKTEST_DB_URL)")
+    p_backtest.add_argument("--spread", type=float, default=None, help="round-trip spread pct (default: BACKTEST_SPREAD_PCT)")
+    p_backtest.add_argument("--warmup", type=int, default=None, help="warmup candles (default: OHLCV_LIMIT)")
+    p_backtest.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_backtest.set_defaults(func=cmd_backtest)
 
     p_stats = sub.add_parser("agent-stats", help="per-agent AI reliability stats (analysis only)")
     p_stats.add_argument("--agent", default=None, help="filter to one agent")

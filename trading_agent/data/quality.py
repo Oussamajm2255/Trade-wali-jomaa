@@ -61,8 +61,14 @@ def validate_candles(
     timeframe: str,
     min_candles: int = 60,
     max_stale_multiple: float = 3.0,
+    now: pd.Timestamp | None = None,
 ) -> DataQuality:
-    """Validate one OHLCV frame: ordering, duplicates, OHLC sanity, history, freshness."""
+    """Validate one OHLCV frame: ordering, duplicates, OHLC sanity, history, freshness.
+
+    `now` defaults to wall-clock time; historical replays (backtesting)
+    pass the replay timestamp so staleness is judged against the moment
+    the signal would have been made — never against today.
+    """
     q = DataQuality()
     if df is None or len(df) == 0:
         return q.add("empty", QualityState.FAIL, "no candles")
@@ -83,7 +89,10 @@ def validate_candles(
     last_ts = df.index[-1]
     if last_ts.tzinfo is None:
         last_ts = last_ts.tz_localize("UTC")
-    age = pd.Timestamp.now(tz="UTC") - last_ts
+    now_ts = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    age = now_ts - last_ts
     if age > max_stale_multiple * pd.Timedelta(CANDLE_DURATION.get(timeframe, "1h")):
         q.add(
             "stale",
@@ -93,7 +102,7 @@ def validate_candles(
     return q
 
 
-def validate_gauge(gauge: dict | None, max_age_hours: int = 48) -> DataQuality:
+def validate_gauge(gauge: dict | None, max_age_hours: int = 48, now: pd.Timestamp | None = None) -> DataQuality:
     """DXY-gauge sanity: presence (for the DXY contract) and freshness."""
     q = DataQuality()
     if not gauge:
@@ -104,7 +113,10 @@ def validate_gauge(gauge: dict | None, max_age_hours: int = 48) -> DataQuality:
         ts = pd.Timestamp(gauge["ts"])
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
-        age = pd.Timestamp.now(tz="UTC") - ts
+        now_ts = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+        if now_ts.tzinfo is None:
+            now_ts = now_ts.tz_localize("UTC")
+        age = now_ts - ts
     except (KeyError, ValueError):
         return q.add("dxy_ts", QualityState.DEGRADED, "DXY gauge timestamp unreadable")
     if age > pd.Timedelta(hours=max_age_hours):

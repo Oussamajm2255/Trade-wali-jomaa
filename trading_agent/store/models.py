@@ -70,6 +70,13 @@ class Position(Base):
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Outcome-engine tracking (spec §23), filled candle-by-candle while
+    # open so MFE/MAE and time-to-exit are known on close.
+    mfe_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bars_open: Mapped[int] = mapped_column(Integer, default=0)
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     proposal: Mapped[Proposal] = relationship(back_populates="position")
 
@@ -128,3 +135,45 @@ class AgentTrack(Base):
     fallback_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
     actual_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
     correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Cycle link (phase 5): the signal record this verdict belonged to.
+    # The outcome engine fills actual_outcome/correct for every verdict
+    # of a cycle once the trade it produced resolves.
+    signal_id: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+
+
+class SignalRecord(Base):
+    """Complete signal record for every analysis cycle (spec §22).
+
+    Both proposals AND rejections are stored — the robot must remember
+    the opportunities it refused, not only the trades it took. All
+    deterministic inputs (versions, snapshot, AI outputs, fusion, setup
+    quality, conflicts, gate trail) are frozen at decision time so any
+    historical decision stays fully explainable.
+    """
+
+    __tablename__ = "signals"
+
+    signal_id: Mapped[str] = mapped_column(String(24), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(8))
+    strategy_version: Mapped[str] = mapped_column(String(32))
+    config_version: Mapped[str] = mapped_column(String(16))
+    prompt_version: Mapped[str] = mapped_column(String(64))
+    market_snapshot: Mapped[dict] = mapped_column(JSON)
+    ai_outputs: Mapped[dict] = mapped_column(JSON)
+    fusion: Mapped[dict] = mapped_column(JSON)
+    setup_quality: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    conflicts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    gates: Mapped[list] = mapped_column(JSON)
+    sl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_decision: Mapped[str] = mapped_column(String(16), index=True)  # proposal | rejected
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    no_trade_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Outcome fields (filled by the outcome engine when the trade resolves).
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)

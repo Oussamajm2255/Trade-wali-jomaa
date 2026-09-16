@@ -21,6 +21,7 @@ from typing import Any
 import pandas as pd
 
 from trading_agent.config import Settings
+from trading_agent.outcome.engine import finalize_position
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import Side, SignalProposal, utcnow
 from trading_agent.store.db import session_scope
@@ -311,12 +312,15 @@ class MT5Broker:
         pos.pnl = round(profit, 8)
         pos.closed_at = utcnow()
         pos.exit_reason = "broker_close"
+        finalize_position(session, pos)
         self.risk.realize_pnl(session, profit)
         session.add(AuditLog(level="INFO", event="position_closed_live",
                              detail={"position_id": pos.id, "ticket": pos.broker_ticket,
-                                     "price": exit_price, "pnl": profit}))
+                                     "price": exit_price, "pnl": profit,
+                                     "outcome": pos.outcome, "r_multiple": pos.r_multiple}))
         return {"position_id": pos.id, "symbol": pos.symbol, "exit_reason": "broker_close",
-                "exit_price": exit_price, "pnl": profit}
+                "exit_price": exit_price, "pnl": profit,
+                "outcome": pos.outcome, "r_multiple": pos.r_multiple}
 
     def _sync_equity(self, mt5: Any) -> None:
         info = mt5.account_info()

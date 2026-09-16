@@ -1,13 +1,21 @@
 """Persistence actions: proposals, decisions, positions, audit trail."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from trading_agent.schema.types import Side, SignalProposal, utcnow
 from trading_agent.store.db import session_scope
-from trading_agent.store.models import AgentTrack, AuditLog, Position, Proposal, RiskState
+from trading_agent.store.models import (
+    AgentTrack,
+    AuditLog,
+    Position,
+    Proposal,
+    RiskState,
+    SignalRecord,
+)
 
 
 def audit(level: str, event: str, detail: dict | None = None) -> None:
@@ -142,7 +150,8 @@ def record_agent_track(rows: list[dict]) -> None:
     """Bulk-insert per-agent history rows (spec §15).
 
     Each row: agent, symbol, timeframe, source, model, prediction,
-    market_regime, confidence, failure_reason, fallback_method.
+    market_regime, confidence, failure_reason, fallback_method and
+    (phase 5) the signal_id of the cycle the verdict belonged to.
     Recording is best-effort: a tracking failure must never kill a cycle.
     """
     if not rows:
@@ -151,6 +160,7 @@ def record_agent_track(rows: list[dict]) -> None:
         session.add_all(
             [
                 AgentTrack(
+                    ts=row.get("ts") or utcnow(),
                     agent=row["agent"],
                     symbol=row.get("symbol", ""),
                     timeframe=row.get("timeframe", ""),
@@ -161,6 +171,7 @@ def record_agent_track(rows: list[dict]) -> None:
                     confidence=row.get("confidence"),
                     failure_reason=row.get("failure_reason"),
                     fallback_method=row.get("fallback_method"),
+                    signal_id=row.get("signal_id"),
                 )
                 for row in rows
             ]
@@ -234,6 +245,103 @@ def evaluated_outcomes(agent: str | None = None, limit: int = 500) -> list[dict]
         for row in rows
         if row.confidence is not None
     ]
+
+
+# ------------------------------------------------------------------ signals
+
+_SIGNAL_SEQ_RE = re.compile(r"-(?P<seq>\d{6})$")
+
+
+def next_signal_id(symbol: str, ts: datetime | None = None) -> str:
+    """Unique per-cycle signal ID, e.g. XAUUSD-20260916-001482 (spec §22).
+
+    Format: <SYMBOL>-<YYYYMMDD>-<6-digit daily sequence>. The sequence
+    restarts each UTC day; historical replays (backtesting) use the
+    signal's own timestamp so IDs stay unique and dated correctly.
+    """
+    ts = ts or utcnow()
+    prefix = "".join(ch for ch in symbol.upper() if ch.isalnum())
+    stem = f"{prefix}-{ts.strftime('%Y%m%d')}-"
+    with session_scope() as session:
+        existing = session.scalars(
+            select(SignalRecord.signal_id).where(SignalRecord.signal_id.like(f"{stem}%"))
+        ).all()
+    seq = 1
+    for sid in existing:
+        match = _SIGNAL_SEQ_RE.search(sid)
+        if match:
+            seq = max(seq, int(match.group("seq")) + 1)
+    return f"{stem}{seq:06d}"
+
+
+def record_signal(record: dict) -> str:
+    """Persist one complete signal record (spec §22).
+
+    Both proposals AND rejections are stored — the robot remembers the
+    opportunities it refused, not only the trades it took. Returns the
+    signal_id. Recording is best-effort for the caller (orchestrator).
+    """
+    with session_scope() as session:
+        row = SignalRecord(**record)
+        session.add(row)
+        session.flush()
+        return row.signal_id
+
+
+def get_signal(signal_id: str) -> SignalRecord | None:
+    with session_scope() as session:
+        return session.get(SignalRecord, signal_id)
+
+
+def list_signals(
+    limit: int = 50,
+    symbol: str | None = None,
+    decision: str | None = None,
+) -> list[SignalRecord]:
+    """Recent signal records, optionally filtered (spec §22)."""
+    with session_scope() as session:
+        query = select(SignalRecord)
+        if symbol:
+            query = query.where(SignalRecord.symbol == symbol)
+        if decision:
+            query = query.where(SignalRecord.final_decision == decision)
+        return list(session.scalars(query.order_by(SignalRecord.ts.desc()).limit(limit)))
+
+
+def link_signal_proposal(signal_id: str | None, proposal_id: str) -> None:
+    """Attach a persisted proposal to its signal record (after save)."""
+    if not signal_id:
+        return
+    with session_scope() as session:
+        row = session.get(SignalRecord, signal_id)
+        if row is not None:
+            row.proposal_id = proposal_id
+
+
+def evaluated_signal_outcomes(limit: int = 500) -> list[dict]:
+    """(confidence, correct) pairs for RESOLVED signals (spec §21/§23).
+
+    The confidence-calibration infrastructure reads this: the historical
+    win rate inside the signal's own raw-confidence bucket. Only WIN/
+    LOSS are countable outcomes; BREAKEVEN/EXPIRED/INVALIDATED and
+    unresolved signals are excluded. raw_confidence comes from the
+    stored fusion dict — never a number the LLM could rewrite later.
+    """
+    with session_scope() as session:
+        rows = session.scalars(
+            select(SignalRecord)
+            .where(SignalRecord.outcome.in_(["WIN", "LOSS"]))
+            .order_by(SignalRecord.ts.desc())
+            .limit(limit)
+        ).all()
+    out: list[dict] = []
+    for row in rows:
+        fusion = row.fusion if isinstance(row.fusion, dict) else {}
+        conf = fusion.get("raw_confidence")
+        if conf is None:
+            continue
+        out.append({"confidence": conf, "correct": row.outcome == "WIN"})
+    return out
 
 
 def _to_signal(row: Proposal) -> SignalProposal:

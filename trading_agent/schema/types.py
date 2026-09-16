@@ -130,6 +130,9 @@ class SignalProposal(BaseModel):
     """
 
     id: str | None = None
+    # Signal-record link (spec §22): the orchestrator stamps every cycle
+    # with a unique ID; the CLI attaches the persisted proposal to it.
+    signal_id: str | None = None
     symbol: str
     timeframe: str
     side: Side
@@ -160,4 +163,6 @@ class Rejection(BaseModel):
     # NO-TRADE classification (spec §20): one of the NoTradeReason codes
     # when the refusal is a deliberate no-trade decision.
     no_trade_reason: str | None = None
+    # Signal-record link (spec §22): every rejected cycle is stored too.
+    signal_id: str | None = None
     created_at: datetime = Field(default_factory=utcnow)

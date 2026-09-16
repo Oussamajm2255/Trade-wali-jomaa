@@ -2,13 +2,14 @@
 
 raw_confidence = abs(direction_score) stays exactly as it was (§16),
 and is never presented as a probability. calibrated_confidence is
-estimated from historical *evaluated* agent outcomes only: it returns
-None until enough outcomes exist (calibration_min_samples in total and
+estimated from historical *resolved signals* only (spec §21: the win
+rate inside the signal's own raw-confidence bucket): it returns None
+until enough outcomes exist (calibration_min_samples in total and
 calibration_min_per_bin in the signal's own confidence bucket), and the
 product never claims calibration before that.
 
-The outcome engine (phase 5) fills AgentTrack.actual_outcome/correct;
-this module is the read side of that pipeline and is inert until then.
+The outcome engine (phase 5) fills SignalRecord.outcome; this module
+is the read side of that pipeline and is inert until then.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ def calibrated_confidence(raw: float, settings: Settings) -> float | None:
     (never a fake number) when the data does not yet support a claim.
     """
     try:
-        rows = actions.evaluated_outcomes(limit=settings.calibration_window)
+        rows = actions.evaluated_signal_outcomes(limit=settings.calibration_window)
     except Exception as exc:  # noqa: BLE001 - calibration must never kill a cycle
         logger.warning("confidence calibration read failed: %s", exc)
         return None

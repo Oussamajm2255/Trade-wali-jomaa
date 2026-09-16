@@ -160,16 +160,26 @@ def build_market_snapshot(
     symbol: str,
     settings: Settings,
     entry_timeframe: str | None = None,
+    now: datetime | None = None,
 ) -> MarketSnapshot:
     """Fetch, validate and compute everything once; the cycle's source of truth.
 
     Raises MarketDataError when the entry timeframe cannot be analysed —
     that is a FAIL: no AI calls, no proposal (§4 / §48 cost control).
+
+    `now` defaults to wall-clock time; historical replays (backtesting)
+    pass the replay timestamp so every time-dependent check (staleness,
+    session classification) reflects the moment the signal was made.
     """
     entry_tf = entry_timeframe or settings.timeframe
     timeframes = [entry_tf] + [tf for tf in settings.snapshot_timeframes if tf != entry_tf]
 
-    snap = MarketSnapshot(symbol=symbol, entry_timeframe=entry_tf, versions=version_stamp())
+    snap = MarketSnapshot(
+        symbol=symbol,
+        entry_timeframe=entry_tf,
+        timestamp=now or datetime.now(timezone.utc),
+        versions=version_stamp(),
+    )
     qualities: list[DataQuality] = []
 
     for tf in timeframes:
@@ -193,6 +203,7 @@ def build_market_snapshot(
             tf,
             min_candles=settings.data_quality_min_candles,
             max_stale_multiple=settings.data_quality_max_stale_multiple,
+            now=now,
         )
         qualities.append(q)
         if q.state == QualityState.FAIL:
@@ -257,7 +268,7 @@ def build_market_snapshot(
     except Exception as exc:  # noqa: BLE001 - gauge failure degrades, never kills
         logger.warning("sentiment gauge fetch failed: %s", exc)
         snap.dxy = None
-    qualities.append(validate_gauge(snap.dxy, settings.dxy_max_age_hours))
+    qualities.append(validate_gauge(snap.dxy, settings.dxy_max_age_hours, now=now))
 
     # Richer DXY context (§9) around the compatibility gauge: level,
     # direction, momentum, trend, volatility from real DXY candles.
@@ -277,8 +288,13 @@ def build_market_snapshot(
     qualities.append(validate_indicators(snap.indicators[entry_tf]))
 
     # Gold-specific key levels (§10) + session classification (§11).
-    snap.session = session_state(london=settings.session_london, new_york=settings.session_new_york)
+    snap.session = session_state(
+        now=now,
+        london=settings.session_london,
+        new_york=settings.session_new_york,
+    )
     snap.session_context = session_context(
+        now=now,
         london=settings.session_london,
         new_york=settings.session_new_york,
         asia=settings.session_asia,
@@ -287,6 +303,7 @@ def build_market_snapshot(
         snap.candles[entry_tf],
         daily_df=snap.candles.get("1d"),
         session_start=session_start_utc(
+            now=now,
             london=settings.session_london,
             new_york=settings.session_new_york,
             asia=settings.session_asia,
