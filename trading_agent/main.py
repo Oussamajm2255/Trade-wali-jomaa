@@ -291,7 +291,7 @@ def cmd_status(_: argparse.Namespace) -> None:
         f"{state.peak_equity:,.2f}",
         f"{drawdown:.2f}%",
         str(len(actions.open_positions())),
-        "[bold red]HALTED[/]" if state.halted else "[green]armed[/]",
+        "[bold red]HALTED[/]" if state.halted else "[green]ready[/]",
     )
     console.print(table)
     if state.halted:
