@@ -43,10 +43,16 @@ def detect_shock(
     movement_pct: float = 1.0,
     spread_pct_threshold: float = 0.0,
     spread: float | None = None,
+    trust_volume: bool = True,
 ) -> dict:
     """Classify the last candle of `df` against its own recent history.
 
     Returns {"state", "ratios", "movement_pct", "spread_pct", "detail"}.
+
+    `trust_volume=False` disables the volume axis — used on proxy data
+    (e.g. PAXG token) where volume measures token flow, not gold flow:
+    a whale order can spike it 9x without any market shock. Price-based
+    axes (range / ATR / movement / spread) stay active either way.
     """
     if len(df) < lookback + 1 or lookback < 1:
         return {
@@ -62,8 +68,11 @@ def detect_shock(
     rng = df["high"] - df["low"]
     atr_vals = atr_series(df)
     ratios: dict[str, float] = {}
-    if "volume" in df.columns:
+    skipped = []
+    if trust_volume and "volume" in df.columns:
         ratios["volume"] = _ratio(float(cur["volume"]), float(prev["volume"].median()))
+    elif "volume" in df.columns:
+        skipped.append("volume (proxy data — token flow, not gold flow)")
     ratios["range"] = _ratio(float(rng.iloc[-1]), float(rng.iloc[-lookback - 1 : -1].median()))
     ratios["atr"] = _ratio(float(atr_vals.iloc[-1]), float(atr_vals.iloc[-lookback - 1 : -1].median()))
 
@@ -83,13 +92,14 @@ def detect_shock(
         offenders.append(f"movement {movement:.2f}%")
     if spread_pct_threshold > 0 and spread_pct is not None and spread_pct >= spread_pct_threshold:
         offenders.append(f"spread {spread_pct:.2f}%")
+    skipped_note = f" (volume skipped: proxy data)" if skipped else ""
     if offenders:
         return {
             "state": ShockState.SHOCK,
             "ratios": ratios,
             "movement_pct": round(movement, 4),
             "spread_pct": round(spread_pct, 4) if spread_pct is not None else None,
-            "detail": "shock: " + "; ".join(offenders),
+            "detail": "shock: " + "; ".join(offenders) + skipped_note,
         }
     expanded = [f"{name} {ratio:.1f}x baseline" for name, ratio in ratios.items()
                 if ratio >= expansion_multiple]
@@ -99,12 +109,12 @@ def detect_shock(
             "ratios": ratios,
             "movement_pct": round(movement, 4),
             "spread_pct": round(spread_pct, 4) if spread_pct is not None else None,
-            "detail": "volatility expansion: " + "; ".join(expanded),
+            "detail": "volatility expansion: " + "; ".join(expanded) + skipped_note,
         }
     return {
         "state": ShockState.NORMAL,
         "ratios": ratios,
         "movement_pct": round(movement, 4),
         "spread_pct": round(spread_pct, 4) if spread_pct is not None else None,
-        "detail": "normal volatility",
+        "detail": "normal volatility" + skipped_note,
     }

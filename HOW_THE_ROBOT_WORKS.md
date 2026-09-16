@@ -136,7 +136,7 @@ The full list — new V2 gates in **bold**:
 | 2 | Neutral | Fused signal must have a direction |
 | 3 | Confidence | `confidence ≥ 0.55` |
 | 4 | **News blackout** | (opt-in) HIGH-importance USD event within 30 min → refused (NFP, CPI...) |
-| 5 | **Market shock** | Violent candle (range/ATR/volume/spread explosion) → new entries blocked + 30 min cooldown. Volatility expansion = warning only |
+| 5 | **Market shock** | Violent candle (range/ATR/volume/spread explosion) → new entries blocked + 30 min cooldown. Volatility expansion = warning only. Volume counts only on real gold data — ignored on the PAXG proxy, where token volume measures crypto flow, not gold |
 | 6 | **No-trade zones** | Structure against the trade, consolidation, agent conflict, low setup quality, bad spread, extreme volatility |
 | 7 | **Statistical quality** | (opt-in) similar historical signals with negative expectancy → refused |
 | 8 | **DXY concurrency** | LONG needs gauge ≥ 55 (weak dollar); SHORT needs gauge ≤ 45 (strong dollar) |

@@ -10,6 +10,7 @@ import pytest
 
 from trading_agent.config import Settings
 from trading_agent.data.shock import ShockState, detect_shock
+from trading_agent.data.snapshot import build_market_snapshot
 from trading_agent.fusion.types import NoTradeReason
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import Rejection, Side
@@ -87,6 +88,26 @@ def test_volume_axis_contributes():
     out = detect_shock(df)
     assert out["state"] == ShockState.SHOCK
     assert out["ratios"]["volume"] >= 3.0
+
+
+def test_volume_axis_skipped_when_untrusted():
+    """Proxy data (PAXG token): a volume spike alone must not shock."""
+    df = _frame(100)
+    df.iloc[-1, df.columns.get_loc("volume")] = 100.0 * 4
+    out = detect_shock(df, trust_volume=False)
+    assert out["state"] == ShockState.NORMAL
+    assert "volume" not in out["ratios"]
+    assert "volume skipped: proxy data" in out["detail"]
+
+
+def test_untrusted_volume_but_range_spike_still_shocks():
+    """Price-based axes stay active even when volume is untrusted."""
+    df = _frame(100)
+    df.iloc[-1, df.columns.get_loc("volume")] = 100.0 * 4
+    out = detect_shock(_spike(df, range_=4.0), trust_volume=False)
+    assert out["state"] == ShockState.SHOCK
+    assert out["ratios"]["range"] >= 3.0
+    assert "volume skipped: proxy data" in out["detail"]
 
 
 def test_insufficient_history_never_shocks():
@@ -219,3 +240,41 @@ def test_volatility_expansion_is_warning_only():
     )
     assert not isinstance(result, Rejection)
     assert next(g for g in gates if g["gate"] == "shock")["status"] == "warning"
+
+
+# ----------------------------------------------------------- snapshot wiring
+
+
+class _ProxyMarket:
+    """Market whose candles come from a proxy feed with a volume spike."""
+
+    last_source = "PAXG/USDT proxy (yfinance unavailable)"
+
+    def __init__(self) -> None:
+        self.calendar_provider = None
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+        n = 300
+        idx = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=n, freq="15min", tz="UTC")
+        close = 4350.0 + pd.Series(range(n), dtype=float).to_numpy() * 0.01
+        df = pd.DataFrame(
+            {"open": close - 0.5, "high": close + 0.5, "low": close - 0.5,
+             "close": close, "volume": 100.0},
+            index=idx,
+        )
+        df.iloc[-1, df.columns.get_loc("volume")] = 100.0 * 4  # would SHOCK if trusted
+        return df
+
+
+def test_snapshot_disables_volume_axis_on_proxy_data():
+    """The snapshot flags proxy feeds so a token volume spike never
+    triggers a false SHOCK (production incident: PAXG volume 9.5x)."""
+    settings = Settings(
+        snapshot_timeframes=["1h"], htf_timeframe="4h", htf_bias_filter_enabled=False,
+        telegram_bot_token="", telegram_chat_id="",
+    )
+    snap = build_market_snapshot(_ProxyMarket(), "XAUUSD", settings, "15m")
+    assert "proxy" in snap.data_source.lower()
+    assert snap.shock_context["state"] == ShockState.NORMAL
+    assert "volume skipped: proxy data" in snap.shock_context["detail"]
+    assert "volume" not in snap.shock_context["ratios"]

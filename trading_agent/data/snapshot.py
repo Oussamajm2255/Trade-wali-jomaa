@@ -302,6 +302,10 @@ def build_market_snapshot(
     # feed degrades to "no events", never to fabricated ones.
     try:
         gauge_spread = snap.dxy.get("spread") if isinstance(snap.dxy, dict) else None
+        # Volume only counts on the primary feed: on proxy data (PAXG
+        # token) volume measures token flow, not gold flow, and a whale
+        # order can spike it 9x without any market shock.
+        trust_volume = "proxy" not in snap.data_source.lower()
         snap.shock_context = detect_shock(
             snap.candles[entry_tf],
             lookback=settings.shock_lookback,
@@ -310,6 +314,7 @@ def build_market_snapshot(
             movement_pct=settings.shock_movement_pct,
             spread_pct_threshold=settings.shock_spread_pct,
             spread=gauge_spread,
+            trust_volume=trust_volume,
         )
     except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
         logger.warning("shock detection failed: %s", exc)
