@@ -12,7 +12,11 @@ from trading_agent.schema.types import AgentVerdict, Regime, Side
 def make_orchestrator(**overrides) -> Orchestrator:
     settings = Settings(
         weight_technical=0.45, weight_regime=0.35, weight_sentiment=0.20,
-        side_threshold=0.25, **overrides,
+        side_threshold=0.25,
+        # Hermetic: never inherit a live DEEPSEEK_API_KEY from .env —
+        # the _run_agents tests assert fallback-only verdicts (§37).
+        deepseek_api_key=None,
+        **overrides,
     )
     # market/risk are unused by _fuse; None is safe here.
     return Orchestrator(settings, market=None, risk=None)  # type: ignore[arg-type]

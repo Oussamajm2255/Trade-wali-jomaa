@@ -111,6 +111,37 @@ class Orchestrator:
         """
         return fuse_verdicts(verdicts, self.settings)
 
+    def _cost_control_reason(self, entry: dict, snap: MarketSnapshot) -> str | None:
+        """Free pre-AI checks (spec §48); a rejection reason when the
+        market is clearly invalid, else None.
+
+        Order matters: kill-switch, price, ATR, then the spread ceiling.
+        The spread ceiling only applies when the provider supplied a
+        spread AND `ai_skip_max_spread_pct` > 0 (0 = disabled).
+        """
+        if self.risk is not None:
+            halted, detail = self.risk.is_halted()
+            if halted:
+                return f"kill-switch armed — analysis skipped ({detail or 'halted'})"
+        price = float(entry.get("last_close") or 0.0)
+        if price <= 0:
+            return "price is not positive — market invalid"
+        atr = float(entry.get("atr_14") or 0.0)
+        if atr <= 0:
+            return "ATR is not positive — volatility invalid"
+        ceiling = self.settings.ai_skip_max_spread_pct
+        if ceiling > 0:
+            gauge = snap.dxy or {}
+            spread = gauge.get("spread") if isinstance(gauge, dict) else None
+            if spread:
+                spread_pct = float(spread) / price * 100.0
+                if spread_pct > ceiling:
+                    return (
+                        f"spread {spread_pct:.4f}% exceeds ceiling "
+                        f"{ceiling:.4f}% — market too expensive to analyze"
+                    )
+        return None
+
     def _record_tracks(
         self,
         verdicts: dict[str, AgentVerdict],
@@ -240,6 +271,18 @@ class Orchestrator:
                 {}, entry, snap.dxy, snap, None, gates,
             )
         gates.append({"gate": "data_quality", "status": "pass"})
+
+        # Cost control (spec §48): a clearly invalid market skips the
+        # DeepSeek calls entirely — no verdicts, no API cost.
+        cost_reason = self._cost_control_reason(entry, snap)
+        if cost_reason:
+            logger.warning("cost control: %s — skipping AI calls", cost_reason)
+            gates.append({"gate": "cost_control", "status": "reject", "detail": cost_reason})
+            return (
+                Rejection(symbol=symbol, reason=cost_reason),
+                {}, entry, snap.dxy, snap, None, gates,
+            )
+        gates.append({"gate": "cost_control", "status": "pass"})
 
         # The bias gate's source is the canonical snapshot (fail-closed above).
         htf_bias = snap.biases.get(self.settings.htf_timeframe) if htf_tf else None

@@ -177,3 +177,9 @@ class SignalRecord(Base):
     # Outcome fields (filled by the outcome engine when the trade resolves).
     outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
     r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    def to_dict(self) -> dict:
+        """Plain dict of every column (JSON columns are real dicts/lists)."""
+        from sqlalchemy import inspect
+
+        return {c.key: getattr(self, c.key) for c in inspect(self).mapper.column_attrs}

@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # --- Notifications (Telegram) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Optional push for REJECTED opportunities (§38): concise, off by
+    # default to keep the phone quiet — rejections always stay in the DB.
+    telegram_rejection_alerts: bool = False
 
     # --- Trading sessions (analysis gate) ---
     # Analysis runs only while London or New York is open. Times are LOCAL
@@ -184,6 +187,13 @@ class Settings(BaseSettings):
     no_trade_high_volatility: bool = False
     no_trade_max_spread_pct: float = 0.0
     require_statistical_edge: bool = False
+
+    # --- Cost control (spec §48) ---
+    # Pre-AI checks, all free: kill-switch, positive price/ATR and a
+    # spread ceiling. When the ceiling is exceeded the cycle skips the
+    # DeepSeek calls entirely (no API cost on clearly invalid markets).
+    # 0 = spread ceiling disabled.
+    ai_skip_max_spread_pct: float = 0.0
 
     # --- Statistical quality gate (INTELLIGENCE_V2 — phase 6, spec §31/§32) ---
     # Compares the candidate against resolved signals sharing its

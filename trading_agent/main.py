@@ -9,11 +9,14 @@ Commands (paper mode):
   positions                closed positions (with outcome metrics)
   signals [--symbol]       recent complete signal records (spec §22)
   signal ID                one full signal record with gate trail
+  replay SIGNAL_ID         deterministic replay of what the robot knew (spec §39)
   backtest SYMBOL [--tf]   candle-by-candle historical replay (deterministic)
   walkforward SYMBOL       walk-forward out-of-sample validation (spec §26)
   sensitivity SYMBOL       parameter sensitivity sweeps (spec §27)
   montecarlo SYMBOL        Monte Carlo risk analysis (spec §28)
   quality SYMBOL           regime analytics + conditional expectancy (spec §29/§30)
+  ab-compare SYMBOL        A/B run LEGACY_BASELINE vs INTELLIGENCE_V2 (spec §40/§41)
+  dashboard [--out]        intelligence dashboard HTML report (spec §45/§46)
   history [--limit N]      recent audit events
   reset-halt               clear the kill-switch after manual review
   loop [--symbols ...]     continuous paper trading loop (stop/target mgmt + proposals)
@@ -28,6 +31,7 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from rich import box
 from rich.console import Console
@@ -221,7 +225,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     proposal_id = actions.save_proposal(result)
     actions.link_signal_proposal(result.signal_id, proposal_id)
     if args.json:
-        console.print_json(result.model_dump())
+        console.print_json(data=result.model_dump())
     _print_proposal(result, pending_id=proposal_id)
 
 
@@ -409,6 +413,161 @@ def cmd_signal(args: argparse.Namespace) -> None:
         console.print(f"[dim]snapshot: {snap.get('error', 'unavailable')}[/]")
 
 
+def cmd_replay(args: argparse.Namespace) -> None:
+    """Deterministic signal replay (spec §39): reconstruct exactly what
+    the robot knew for one signal — read from the stored record, never
+    recomputed, with statistical context stopping at decision time."""
+    from trading_agent.analytics.contribution import feature_contribution
+    from trading_agent.analytics.stats import compute_trade_stats, resolved_signals
+
+    if args.db:
+        init_engine(args.db)
+    _components()
+    row = actions.get_signal(args.signal_id)
+    if row is None:
+        console.print(f"[red]Signal {args.signal_id} not found.[/]")
+        sys.exit(1)
+    record = row.to_dict()
+    snap = record.get("market_snapshot") or {}
+
+    # Statistical context at decision time: only signals resolved BEFORE
+    # this one (no look-ahead) — the replay is fully deterministic.
+    with session_scope() as session:
+        hist = resolved_signals(session, limit=args.context, before=row.ts, symbol=row.symbol)
+    stats = compute_trade_stats([(r.outcome, r.r_multiple) for r in hist])
+    contribution = feature_contribution(record)
+
+    payload = {
+        "signal_id": row.signal_id,
+        "ts": row.ts.isoformat() if row.ts else None,
+        "symbol": row.symbol,
+        "timeframe": row.timeframe,
+        "strategy_version": row.strategy_version,
+        "decision": row.final_decision,
+        "reason": row.decision_reason,
+        "no_trade_reason": row.no_trade_reason,
+        "market_snapshot": snap,
+        "ai_outputs": record.get("ai_outputs") or {},
+        "fusion": record.get("fusion") or {},
+        "setup_quality": record.get("setup_quality"),
+        "conflicts": record.get("conflicts"),
+        "gates": record.get("gates") or [],
+        "sl": row.sl,
+        "tp": row.tp,
+        "size": row.size,
+        "risk_amount": row.risk_amount,
+        "outcome": row.outcome,
+        "r_multiple": row.r_multiple,
+        "contribution": contribution.to_dict(),
+        "statistical_context": {"resolved_before": len(hist), "stats": stats.to_dict()},
+    }
+    if args.json:
+        console.print_json(data=payload)
+        return
+
+    style = "green" if row.final_decision == "proposal" else "yellow"
+    fusion = record.get("fusion") or {}
+    header = (
+        f"[bold]{row.signal_id}[/] {row.symbol} {row.timeframe} — "
+        f"[bold {style}]{row.final_decision}[/]"
+        + (f" (outcome {row.outcome}, R {row.r_multiple:+.2f})" if row.outcome else "")
+        + f"\nstrategy {row.strategy_version} | at {row.ts}"
+        + (f"\nconfidence {fusion.get('raw_confidence')}" if fusion.get("raw_confidence") is not None else "")
+        + (f" | direction {fusion.get('direction_score'):+.2f}" if fusion.get("direction_score") is not None else "")
+        + (f" | calibrated {fusion.get('calibrated_confidence')}" if fusion.get("calibrated_confidence") is not None else "")
+        + (f"\nSL {row.sl:,.8g} | TP {row.tp:,.8g} | size {row.size:,.8g} | risk {row.risk_amount:.2f} USD" if row.final_decision == "proposal" else "")
+        + f"\nreason: {row.decision_reason or '-'} (no-trade {row.no_trade_reason or '-'})"
+    )
+    console.print(Panel.fit(header, title="Signal replay (spec §39)", border_style=style))
+
+    ctx = []
+    if snap.get("price"):
+        ctx.append(f"price {snap['price']:,.8g}")
+    regime = (snap.get("regime") or {}).get("regime")
+    if regime:
+        ctx.append(f"regime {regime}")
+    session = (snap.get("session_context") or {}).get("session")
+    if session:
+        ctx.append(f"session {session}")
+    if snap.get("data_quality"):
+        ctx.append(f"quality {snap['data_quality']}")
+    if snap.get("data_source"):
+        ctx.append(f"source {snap['data_source']}")
+    if snap.get("last_close"):
+        ctx.append(f"close {snap['last_close']:,.8g}")
+    for key in ("rsi_14", "adx_14", "atr_14"):
+        if snap.get(key) is not None:
+            ctx.append(f"{key} {snap[key]}")
+    console.print("[bold]Market snapshot[/] " + " | ".join(ctx) if ctx else "[dim]snapshot unavailable[/]")
+
+    dxy_gauge = snap.get("dxy_gauge") or {}
+    dxy_ctx = snap.get("dxy_context") or {}
+    dxy_parts = []
+    if dxy_gauge:
+        dxy_parts.append(f"gauge {dxy_gauge.get('value')} ({dxy_gauge.get('classification')})")
+    if dxy_ctx:
+        for key in ("direction", "trend", "momentum_pct", "classification"):
+            if dxy_ctx.get(key) is not None:
+                dxy_parts.append(f"{key} {dxy_ctx[key]}")
+    console.print("[bold]DXY[/] " + " | ".join(dxy_parts) if dxy_parts else "[dim]DXY n/a[/]")
+
+    mtf = snap.get("mtf_biases") or {}
+    if mtf:
+        console.print("[bold]Timeframes[/] " + " · ".join(
+            f"{tf}: {b.get('bias')}" for tf, b in mtf.items()
+        ))
+    structure = snap.get("structure") or {}
+    present = [k for k in ("bos", "choch", "fvgs", "sweeps") if structure.get(k)]
+    if present:
+        console.print(f"[bold]Structure[/] {', '.join(present)}")
+
+    quality = record.get("setup_quality") or {}
+    conflicts = record.get("conflicts") or {}
+    console.print(
+        f"[bold]Quality[/] score {quality.get('score', 'n/a')} | "
+        f"components {quality.get('components') or '-'} | conflict state {conflicts.get('state', 'n/a')}"
+    )
+
+    ai = record.get("ai_outputs") or {}
+    if ai:
+        t = Table(title="AI outputs (stored)", box=box.ROUNDED)
+        for col in ("Agent", "Bias", "Conviction", "Source"):
+            t.add_column(col)
+        for name, verdict in sorted(ai.items()):
+            verdict = verdict or {}
+            payload = verdict.get("payload") or {}
+            conviction = payload.get("conviction")
+            t.add_row(
+                name,
+                str(payload.get("bias") or payload.get("side") or "-"),
+                f"{conviction:.2f}" if isinstance(conviction, (int, float)) else "-",
+                verdict.get("source", "-"),
+            )
+        console.print(t)
+
+    gates = record.get("gates") or []
+    if gates:
+        t = Table(title="Risk gates (stored)", box=box.ROUNDED)
+        for col in ("Gate", "Status", "Detail"):
+            t.add_column(col)
+        for g in gates:
+            t.add_row(g.get("gate", "-"), g.get("status", "-"), str(g.get("detail", ""))[:70])
+        console.print(t)
+
+    console.print(
+        f"[bold]Statistical context at decision time[/] {len(hist)} resolved before | "
+        f"win rate {_fmt_stat(stats.win_rate)} | expectancy {_fmt_stat(stats.expectancy_r)} R | "
+        f"PF {_fmt_stat(stats.profit_factor)}"
+    )
+
+    if contribution.supporting:
+        console.print(f"[green]Soutient :[/] " + " · ".join(contribution.supporting))
+    if contribution.contradicting:
+        console.print(f"[red]Contredit :[/] " + " · ".join(contribution.contradicting))
+    if contribution.invalidation:
+        console.print(f"[yellow]Invalidation :[/] {contribution.invalidation}")
+
+
 def _fetch_frames(
     settings: Settings, symbol: str, tf: str, limit: int
 ) -> tuple[dict, object | None]:
@@ -465,7 +624,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
 def _print_backtest(report, as_json: bool = False) -> None:
     if as_json:
-        console.print_json(report.to_dict())
+        console.print_json(data=report.to_dict())
         return
     stats = report.stats
     console.print(Panel.fit(
@@ -527,7 +686,7 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
         console.print(f"[red]{exc}[/]")
         sys.exit(1)
     if args.json:
-        console.print_json(report.to_dict())
+        console.print_json(data=report.to_dict())
         return
     agg = report.aggregate
     console.print(Panel.fit(
@@ -587,7 +746,7 @@ def cmd_sensitivity(args: argparse.Namespace) -> None:
         dxy_frames=dxy, warmup=args.warmup, spread_pct=args.spread,
     )
     if args.json:
-        console.print_json(report.to_dict())
+        console.print_json(data=report.to_dict())
         return
     table = Table(title=f"Sensitivity — {report.symbol} {report.timeframe}", box=box.ROUNDED)
     for col in ("Parameter", "Value", "Trades", "Win rate", "Expectancy R", "PF", "Max DD %"):
@@ -645,7 +804,7 @@ def cmd_montecarlo(args: argparse.Namespace) -> None:
     if args.json:
         payload = report.to_dict()
         payload["sample_trades"] = len(trade_rs)
-        console.print_json(payload)
+        console.print_json(data=payload)
         return
     console.print(Panel.fit(
         f"[bold]{report.n_simulations} randomized orderings[/] of "
@@ -696,7 +855,7 @@ def cmd_quality(args: argparse.Namespace) -> None:
         }
         if conditions:
             payload["conditional"] = conditional_expectancy(rows, conditions).to_dict()
-        console.print_json(payload)
+        console.print_json(data=payload)
         return
     if conditions:
         stats = conditional_expectancy(rows, conditions)
@@ -725,6 +884,101 @@ def cmd_quality(args: argparse.Namespace) -> None:
         f"[dim]min sample for statistical quality: {settings.min_sample_for_statistics} "
         f"(gate enabled: {settings.statistical_quality_enabled})[/]"
     )
+
+
+def cmd_ab_compare(args: argparse.Namespace) -> None:
+    """A/B comparison LEGACY_BASELINE vs INTELLIGENCE_V2 (spec §40/§41)."""
+    from trading_agent.analytics.compare import run_comparison
+
+    settings = get_settings()
+    symbol = args.symbol
+    tf = args.tf or settings.timeframe
+    limit = args.limit or settings.backtest_history_limit
+    frames, dxy = _fetch_frames(settings, symbol, tf, limit)
+    if tf not in frames:
+        console.print(f"[red]Entry timeframe {tf} data unavailable — aborting.[/]")
+        sys.exit(1)
+    try:
+        report = run_comparison(
+            settings, frames, symbol=symbol, timeframe=tf, dxy_frames=dxy,
+            start=args.start, end=args.end, db_url=args.db,
+            spread_pct=args.spread, warmup=args.warmup, min_trades=args.min_trades,
+        )
+    except BacktestError as exc:
+        console.print(f"[red]{exc}[/]")
+        sys.exit(1)
+    if args.json:
+        console.print_json(data=report.to_dict())
+        return
+    a = report.results["legacy_baseline"]
+    b = report.results["intelligence_v2"]
+    table = Table(
+        title=f"A/B comparison — {symbol} {tf} ({report.start_ts} -> {report.end_ts})",
+        box=box.ROUNDED,
+    )
+    for col in ("Metric", "LEGACY_BASELINE", "INTELLIGENCE_V2"):
+        table.add_column(col)
+    for metric, key, fmt in (
+        ("Trades", "trades", str),
+        ("Win rate", "win_rate", _fmt_stat),
+        ("Expectancy R", "expectancy_r", _fmt_stat),
+        ("Profit factor", "profit_factor", _fmt_stat),
+        ("Max drawdown %", "max_drawdown_pct", _fmt_stat),
+        ("Total PnL USD", "total_pnl", lambda v: f"{v:+,.2f}"),
+        ("Halt events", "halt_events", str),
+    ):
+        table.add_row(metric, fmt(a.report.stats.get(key)), fmt(b.report.stats.get(key)))
+    console.print(table)
+    style = {
+        "IMPROVED": "green", "MIXED": "yellow", "WORSE": "red", "INSUFFICIENT_DATA": "yellow",
+    }.get(b.verdict, "white")
+    console.print(
+        f"[bold {style}]Verdict : INTELLIGENCE_V2 {b.verdict}[/] — {b.verdict_note}\n"
+        f"[dim]Générer moins de trades n'est jamais une amélioration en soi (§41).[/]\n"
+        f"[dim]baseline DB {a.report.db_url} | v2 DB {b.report.db_url}[/]"
+    )
+
+
+def cmd_dashboard(args: argparse.Namespace) -> None:
+    """Intelligence dashboard (spec §45): self-contained HTML report."""
+    from trading_agent.dashboard.report import build_dashboard_html
+
+    if args.db:
+        init_engine(args.db)
+    _components()
+    with session_scope() as session:
+        page = build_dashboard_html(session)
+    out = Path(args.out) if args.out else Path("dashboard.html")
+    out.write_text(page, encoding="utf-8")
+    console.print(f"[green]Dashboard écrit dans {out.resolve()}[/]")
+    if args.serve:
+        _serve_dashboard(page, args.port)
+
+
+def _serve_dashboard(page: str, port: int) -> None:
+    """Serve the static report on 127.0.0.1 (local only, no deps)."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    body = page.encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_: object) -> None:  # quiet server
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    console.print(
+        f"[green]Dashboard: http://127.0.0.1:{port}[/] (Ctrl+C pour arrêter)"
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n[dim]Serveur arrêté.[/]")
 
 
 def cmd_agent_stats(args: argparse.Namespace) -> None:
@@ -1001,6 +1255,12 @@ def cmd_loop(args: argparse.Namespace) -> None:
                             "strategy_version": version_stamp()["strategy_version"],
                         },
                     )
+                    # Optional phone alert for refused opportunities (§38):
+                    # concise, off by default, always traced to the record.
+                    if notifier.enabled and result.signal_id:
+                        row = actions.get_signal(result.signal_id)
+                        if row is not None:
+                            notifier.send_rejection(row.to_dict())
                     continue
                 proposal_id = actions.save_proposal(result)
                 actions.link_signal_proposal(result.signal_id, proposal_id)
@@ -1012,7 +1272,8 @@ def cmd_loop(args: argparse.Namespace) -> None:
                     f"  approve: [green]python -m trading_agent.main approve {proposal_id}[/]"
                 )
                 if notifier.enabled:
-                    notifier.send_signal(result, gauge)
+                    row = actions.get_signal(result.signal_id) if result.signal_id else None
+                    notifier.send_signal(result, gauge, row.to_dict() if row else None, proposal_id)
             time.sleep(args.interval)
         except KeyboardInterrupt:
             console.print("\n[dim]Loop stopped.[/]")
@@ -1070,6 +1331,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_signal.add_argument("signal_id")
     p_signal.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
     p_signal.set_defaults(func=cmd_signal)
+
+    p_replay = sub.add_parser("replay", help="deterministic replay of what the robot knew (spec §39)")
+    p_replay.add_argument("signal_id")
+    p_replay.add_argument("--context", type=int, default=200, help="resolved signals read before this one")
+    p_replay.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
+    p_replay.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_replay.set_defaults(func=cmd_replay)
 
     p_backtest = sub.add_parser("backtest", help="candle-by-candle historical replay (deterministic)")
     p_backtest.add_argument("symbol")
@@ -1136,6 +1404,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_qual.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
     p_qual.add_argument("--json", action="store_true", help="print machine-readable JSON")
     p_qual.set_defaults(func=cmd_quality)
+
+    p_ab = sub.add_parser("ab-compare", help="A/B comparison LEGACY_BASELINE vs INTELLIGENCE_V2 (spec §40/§41)")
+    p_ab.add_argument("symbol")
+    p_ab.add_argument("--tf", default=None, help="timeframe override, e.g. 15m/1h/4h")
+    p_ab.add_argument("--start", default=None, help="ISO start (default: earliest data)")
+    p_ab.add_argument("--end", default=None, help="ISO end (default: latest data)")
+    p_ab.add_argument("--limit", type=int, default=None, help="candles fetched per timeframe")
+    p_ab.add_argument("--db", default=None, help="base DB URL (per-strategy siblings derived)")
+    p_ab.add_argument("--spread", type=float, default=None, help="round-trip spread pct")
+    p_ab.add_argument("--warmup", type=int, default=None, help="indicator warmup candles")
+    p_ab.add_argument("--min-trades", type=int, default=10, help="minimum resolved trades per side for a verdict")
+    p_ab.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p_ab.set_defaults(func=cmd_ab_compare)
+
+    p_dash = sub.add_parser("dashboard", help="generate the intelligence dashboard HTML (spec §45/§46)")
+    p_dash.add_argument("--db", default=None, help="database override (e.g. a backtest DB)")
+    p_dash.add_argument("--out", default=None, help="output HTML path (default: dashboard.html)")
+    p_dash.add_argument("--serve", action="store_true", help="serve on 127.0.0.1 (local only)")
+    p_dash.add_argument("--port", type=int, default=8000, help="port for --serve")
+    p_dash.set_defaults(func=cmd_dashboard)
 
     p_stats = sub.add_parser("agent-stats", help="per-agent AI reliability stats (analysis only)")
     p_stats.add_argument("--agent", default=None, help="filter to one agent")

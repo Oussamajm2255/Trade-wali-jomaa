@@ -342,3 +342,51 @@ def resolved_signals(
         rows = [r for r in rows if _utc(r.ts) < boundary]
     rows.reverse()
     return rows
+
+
+# --- §46 confidence analytics ----------------------------------------------
+
+# Fixed buckets from the spec: 0.50-0.55 through 0.80+.
+_CONFIDENCE_BUCKETS = [
+    ("0.50–0.55", 0.50, 0.55),
+    ("0.55–0.60", 0.55, 0.60),
+    ("0.60–0.65", 0.60, 0.65),
+    ("0.65–0.70", 0.65, 0.70),
+    ("0.70–0.80", 0.70, 0.80),
+    ("0.80+", 0.80, 1.01),
+]
+
+
+def confidence_buckets(rows: list[SignalRecord], min_sample: int = 20) -> list[dict]:
+    """§46: per-bucket sample size / win rate / expectancy / average R.
+
+    Only buckets at or above `min_sample` are marked sufficient for
+    conclusions — smaller buckets must not be over-interpreted (§46).
+    """
+    groups: dict[str, list[tuple[str | None, float | None]]] = {
+        label: [] for label, _, _ in _CONFIDENCE_BUCKETS
+    }
+    for row in rows:
+        fusion = row.fusion or {}
+        conf = fusion.get("raw_confidence")
+        if not isinstance(conf, (int, float)):
+            continue
+        for label, lo, hi in _CONFIDENCE_BUCKETS:
+            if lo <= conf < hi:
+                groups[label].append((row.outcome, row.r_multiple))
+                break
+    out: list[dict] = []
+    for label, lo, hi in _CONFIDENCE_BUCKETS:
+        stats = compute_trade_stats(groups[label])
+        out.append({
+            "bucket": label,
+            "min": lo,
+            "max": None if hi >= 1.0 else hi,
+            "trades": stats.trades,
+            "wins": stats.wins,
+            "win_rate": stats.win_rate,
+            "expectancy_r": stats.expectancy_r,
+            "avg_r": stats.avg_r,
+            "sufficient": stats.trades >= min_sample,
+        })
+    return out

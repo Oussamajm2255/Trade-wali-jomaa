@@ -1,21 +1,44 @@
 """Telegram notifications — real-time signals on the user's phone.
 
-One-way for now: the robot pushes startup confirmations, trade signals and
-kill-switch alerts. Decisions stay in the CLI (`approve` / `reject`) — the
-robot never executes on its own. Every send is best-effort: a failed
-notification must never break the trading loop.
+One-way for now: the robot pushes startup confirmations, full spec §38
+trade signals and kill-switch alerts; rejected opportunities are sent
+only when `telegram_rejection_alerts` is on. Decisions stay in the CLI
+(`approve` / `reject`) — the robot never executes on its own. Every
+send is best-effort: a failed notification must never break the loop.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
 
+from trading_agent.analytics.contribution import feature_contribution
 from trading_agent.config import Settings
 from trading_agent.schema.types import SignalProposal
 
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.telegram.org"
+
+# Canonical MTF display order for the bias line (spec §38).
+_MTF_ORDER = ["1d", "4h", "1h", "15m"]
+_TF_LABELS = {"1d": "1D", "4h": "4H", "1h": "1H", "15m": "15m", "5m": "5m", "30m": "30m"}
+_BIAS_LABELS = {"long": "haussière", "short": "baissière", "neutral": "neutre"}
+_DXY_TREND_LABELS = {"bull": "haussière", "bear": "baissière", "flat": "plate"}
+_REGIME_LABELS = {
+    "trend_up": "tendance haussière",
+    "trend_down": "tendance baissière",
+    "high_volatility": "volatilité élevée",
+    "low_volatility": "volatilité basse",
+    "transition": "transition",
+    "range": "range",
+}
+_SESSION_LABELS = {
+    "ASIA": "Asie",
+    "LONDON": "Londres",
+    "NEW_YORK": "New York",
+    "LONDON_NY_OVERLAP": "Chevauchement Londres+NY",
+    "OFF_SESSION": "hors session",
+}
 
 
 class TelegramNotifier:
@@ -56,10 +79,133 @@ class TelegramNotifier:
         )
         return self.send(text)
 
-    def send_signal(self, proposal: SignalProposal, gauge: dict | None) -> bool:
+    def proposal_message(
+        self,
+        proposal: SignalProposal,
+        gauge: dict | None = None,
+        record: dict | None = None,
+        proposal_id: str | None = None,
+    ) -> str:
+        """Full spec §38 proposal text — every field from the stored record.
+
+        With `record` (the SignalRecord dict, spec §22) the message shows
+        the complete traceable field list: MTF biases, regime, DXY,
+        session, structure, §47 contribution, risk-gate trail, AI agent
+        summaries and strategy version. Without a record it falls back to
+        the legacy short format — nothing is invented.
+        """
+        if record is None:
+            return self._legacy_signal_text(proposal, gauge, proposal_id)
+        snap = record.get("market_snapshot") or {}
+        fusion = record.get("fusion") or {}
+        quality = record.get("setup_quality") or {}
+        conflicts = record.get("conflicts") or {}
+        gates = record.get("gates") or []
+        outputs = record.get("ai_outputs") or {}
+        contribution = feature_contribution(record)
+
+        lines = [
+            f"🎯 SIGNAL {proposal.symbol} — {proposal.side.value.upper()}",
+            "",
+            f"Entrée : {proposal.entry:,.2f}",
+            f"Stop : {proposal.stop:,.2f}",
+            f"Objectif : {proposal.target:,.2f}",
+            f"RR : {proposal.expected_rr or 0.0:.2f} | Taille : {proposal.size:,.4f}"
+            f" | Risque : {proposal.risk_amount:,.2f} $",
+            "",
+        ]
+
+        calibrated = fusion.get("calibrated_confidence")
+        conf = f"Confiance brute : {proposal.confidence:.2f}"
+        if calibrated is not None:
+            conf += f" | Calibrée : {float(calibrated):.2f}"
+        lines.append(conf)
+        sq = quality.get("score")
+        if sq is not None:
+            state = conflicts.get("state")
+            lines.append(f"Qualité du setup : {sq:.2f}" + (f" (conflits : {state})" if state else ""))
+
+        mtf = snap.get("mtf_biases") or {}
+        ordered = [tf for tf in _MTF_ORDER if tf in mtf] + sorted(set(mtf) - set(_MTF_ORDER))
+        if ordered:
+            parts = [
+                f"{_TF_LABELS.get(tf, tf)} "
+                f"{_BIAS_LABELS.get(str(mtf[tf].get('bias')).lower(), mtf[tf].get('bias'))}"
+                for tf in ordered
+            ]
+            lines.append("Biais MTF : " + " · ".join(parts))
+        regime = (snap.get("regime") or {}).get("regime")
+        dxy_ctx = snap.get("dxy_context") or {}
+        dxy_gauge = snap.get("dxy_gauge") or {}
+        dxy_class = dxy_ctx.get("classification") or dxy_gauge.get("classification")
+        dxy_trend = dxy_ctx.get("trend")
+        session = (snap.get("session_context") or {}).get("session")
+        ctx = []
+        if regime:
+            ctx.append(f"Régime : {_REGIME_LABELS.get(regime, regime)}")
+        if dxy_class:
+            ctx.append(f"DXY : {dxy_class}")
+        if dxy_trend:
+            ctx.append(f"Tendance DXY : {_DXY_TREND_LABELS.get(str(dxy_trend).lower(), dxy_trend)}")
+        if session:
+            ctx.append(f"Session : {_SESSION_LABELS.get(session, session)}")
+        if ctx:
+            lines.append(" | ".join(ctx))
+
+        structure = snap.get("structure") or {}
+        present = [
+            label for key, label in (("bos", "BOS"), ("choch", "CHoCH"),
+                                     ("fvgs", "FVG"), ("sweeps", "balayage de liquidité"))
+            if structure.get(key)
+        ]
+        if present:
+            lines.append("Structure : " + ", ".join(present))
+        if contribution.supporting:
+            lines.append("Soutient : " + " · ".join(contribution.supporting))
+        if contribution.contradicting:
+            lines.append("Contredit : " + " · ".join(contribution.contradicting))
+        if contribution.invalidation:
+            lines.append("Invalidation : " + contribution.invalidation)
+
+        trail = []
+        for gate in gates:
+            mark = "✓" if gate.get("status") == "pass" else "✗"
+            trail.append(f"{gate.get('gate')} {mark}")
+        if trail:
+            lines.append("Gates : " + " | ".join(trail))
+        for name, verdict in sorted(outputs.items()):
+            verdict = verdict or {}
+            payload = verdict.get("payload") or {}
+            bias = payload.get("bias") or payload.get("side") or "?"
+            piece = f"{name.upper()} : {bias}"
+            conviction = payload.get("conviction")
+            if isinstance(conviction, (int, float)):
+                piece += f" ({conviction:.2f})"
+            if verdict.get("source") == "fallback":
+                piece += " [heuristique]"
+            lines.append(piece)
+
+        lines += [
+            "",
+            f"Version : {record.get('strategy_version') or proposal.model}",
+            "",
+            "⏳ EN ATTENTE D'APPROBATION HUMAINE",
+        ]
+        if proposal_id:
+            lines += [
+                f"✅ Approuver : python -m trading_agent.main approve {proposal_id}",
+                f"❌ Rejeter  : python -m trading_agent.main reject {proposal_id}",
+            ]
+        return "\n".join(lines)
+
+    def _legacy_signal_text(
+        self, proposal: SignalProposal, gauge: dict | None, proposal_id: str | None
+    ) -> str:
+        """Pre-record fallback: the short format, kept backward-compatible."""
         dxy_line = ""
         if gauge and gauge.get("kind") == "dxy":
             dxy_line = f"DXY : {gauge.get('value')} ({gauge.get('classification')})\n"
+        decision_id = proposal_id or proposal.id
         text = (
             f"🎯 SIGNAL {proposal.symbol} — {proposal.side.value.upper()}\n\n"
             f"Entrée : {proposal.entry:,.2f}\n"
@@ -68,10 +214,42 @@ class TelegramNotifier:
             f"Taille : {proposal.size:,.4f}\n"
             f"Risque : {proposal.risk_amount:,.2f} $ | Confiance : {proposal.confidence:.2f}\n"
             f"{dxy_line}\n"
-            f"✅ Approuver : python -m trading_agent.main approve {proposal.id}\n"
-            f"❌ Rejeter  : python -m trading_agent.main reject {proposal.id}"
+            f"✅ Approuver : python -m trading_agent.main approve {decision_id}\n"
+            f"❌ Rejeter  : python -m trading_agent.main reject {decision_id}"
         )
-        return self.send(text)
+        return text
+
+    def rejection_message(self, record: dict) -> str:
+        """Concise rejected-opportunity alert (§38), traced to the record."""
+        reason = record.get("decision_reason") or "aucune raison enregistrée"
+        code = record.get("no_trade_reason")
+        lines = [
+            f"🚫 SIGNAL REJETÉ {record.get('symbol', '?')}",
+            f"Raison : {reason}" + (f" ({code})" if code else ""),
+        ]
+        snap = record.get("market_snapshot") or {}
+        quality = snap.get("data_quality")
+        if quality:
+            lines.append(f"Qualité des données : {quality}")
+        version = record.get("strategy_version")
+        if version:
+            lines.append(f"Version : {version}")
+        return "\n".join(lines)
+
+    def send_signal(
+        self,
+        proposal: SignalProposal,
+        gauge: dict | None = None,
+        record: dict | None = None,
+        proposal_id: str | None = None,
+    ) -> bool:
+        return self.send(self.proposal_message(proposal, gauge, record, proposal_id))
+
+    def send_rejection(self, record: dict) -> bool:
+        """Rejected-opportunity alert, gated by telegram_rejection_alerts."""
+        if not self.s.telegram_rejection_alerts:
+            return False
+        return self.send(self.rejection_message(record))
 
     def send_alert(self, text: str) -> bool:
         return self.send(f"🚨 {text}")
