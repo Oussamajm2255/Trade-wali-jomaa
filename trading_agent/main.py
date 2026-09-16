@@ -1133,7 +1133,7 @@ def cmd_loop(args: argparse.Namespace) -> None:
             console.print(f"[red]{exc}[/]")
             sys.exit(1)
     session_note = (
-        f"sessions Londres/NY uniquement ({settings.session_london} / {settings.session_new_york} locales)"
+        f"sessions Londres/NY/Sydney ({settings.session_london} / {settings.session_new_york} / {settings.session_sydney} locales)"
         if settings.session_filter_enabled
         else "toutes heures"
     )
@@ -1211,6 +1211,7 @@ def cmd_loop(args: argparse.Namespace) -> None:
                     session = session_state(
                         london=settings.session_london,
                         new_york=settings.session_new_york,
+                        sydney=settings.session_sydney,
                     )
                     if not session["in_session"]:
                         if not sleep_banner_shown:

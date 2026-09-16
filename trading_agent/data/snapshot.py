@@ -333,12 +333,14 @@ def build_market_snapshot(
         now=now,
         london=settings.session_london,
         new_york=settings.session_new_york,
+        sydney=settings.session_sydney,
     )
     snap.session_context = session_context(
         now=now,
         london=settings.session_london,
         new_york=settings.session_new_york,
         asia=settings.session_asia,
+        sydney=settings.session_sydney,
     )
     snap.gold_context = compute_gold_context(
         snap.candles[entry_tf],
@@ -348,6 +350,7 @@ def build_market_snapshot(
             london=settings.session_london,
             new_york=settings.session_new_york,
             asia=settings.session_asia,
+            sydney=settings.session_sydney,
         ),
     )
 

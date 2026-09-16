@@ -103,7 +103,9 @@ def test_snapshot_carries_phase2_deterministic_context() -> None:
     assert snap.dxy_context["source"] == "gauge only"
     assert snap.gold_context["daily_open"] is not None
     assert snap.gold_context["prev_day_high"] is not None
-    assert snap.session_context["session"] in ("ASIA", "LONDON", "LONDON_NY_OVERLAP", "NEW_YORK", "OFF_SESSION")
+    assert snap.session_context["session"] in (
+        "ASIA", "SYDNEY", "LONDON", "LONDON_NY_OVERLAP", "NEW_YORK", "OFF_SESSION"
+    )
     entry = snap.entry_snapshot_for_llm("4h")
     assert "mtf_biases" in entry and "alignment" in entry
     assert entry["structure"]["timeframe"] == "15m"

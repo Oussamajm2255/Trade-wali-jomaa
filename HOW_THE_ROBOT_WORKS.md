@@ -358,5 +358,6 @@ signal record; it doesn't block.
 
 *Guide updated after the INTELLIGENCE_V2 upgrade (all 57 spec sections
 delivered). Current config: 15m entries, 4h bias, DXY gate on, session
-gate OFF (24/7 testing), shock detection ON, news filter OFF (opt-in),
-statistical quality OFF (opt-in).*
+gate ON (London/NY/Sydney, set SESSION_SYDNEY="" to drop Sydney), shock
+detection ON, news filter OFF (opt-in), statistical quality OFF
+(opt-in).*

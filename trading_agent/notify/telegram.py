@@ -34,6 +34,7 @@ _REGIME_LABELS = {
 }
 _SESSION_LABELS = {
     "ASIA": "Asie",
+    "SYDNEY": "Sydney",
     "LONDON": "Londres",
     "NEW_YORK": "New York",
     "LONDON_NY_OVERLAP": "Chevauchement Londres+NY",

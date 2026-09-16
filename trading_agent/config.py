@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # ASIA window (Tokyo local) — used only for the session CLASSIFICATION
     # stored with every signal (spec §11); it never gates analysis.
     session_asia: str = "09:00-18:00"
+    # SYDNEY window (Sydney local) — a third analysis GATE alongside
+    # London/NY: it opens the FX week (Sunday evening UTC) and covers the
+    # post-New-York window. Set SESSION_SYDNEY="" to disable it.
+    session_sydney: str = "07:00-16:00"
 
     # --- Multi-timeframe (pro logic) ---
     # TIMEFRAME (15m) is the ENTRY timeframe: triggers, stops, targets.

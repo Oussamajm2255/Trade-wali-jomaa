@@ -53,6 +53,7 @@ _SESSION_QUALITY = {
     "LONDON_NY_OVERLAP": 1.0,
     "LONDON": 0.8,
     "NEW_YORK": 0.8,
+    "SYDNEY": 0.6,
     "ASIA": 0.5,
     "OFF_SESSION": 0.3,
 }
