@@ -4,7 +4,12 @@ signal, then hands it to the risk engine (which has final say).
 Phase 3 (spec §12-§15, §37): agents consume the canonical snapshot only,
 every verdict is reliability-tracked, LLM failures are classified and
 fall back to labelled heuristics, and too many failed agents block new
-proposals (configurable)."""
+proposals (configurable).
+
+Phase 4 (spec §16-§21): fusion returns a signed direction_score plus
+raw_confidence and per-agent contributions; the deterministic setup
+quality / conflict / calibration context is assembled by the fusion
+layer and handed to the risk engine with every candidate."""
 from __future__ import annotations
 
 import logging
@@ -20,13 +25,12 @@ from trading_agent.config import Settings
 from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.quality import QualityState
 from trading_agent.data.snapshot import MarketSnapshot, build_market_snapshot
+from trading_agent.fusion.engine import build_fusion_context, fuse_verdicts
+from trading_agent.fusion.types import FusionResult
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import (
     AgentVerdict,
-    Bias,
-    Regime,
     Rejection,
-    Side,
     SignalProposal,
 )
 from trading_agent.store import actions
@@ -92,51 +96,13 @@ class Orchestrator:
                     logger.error("agent %s crashed: %s", name, exc)
         return verdicts
 
-    def _fuse(self, verdicts: dict[str, AgentVerdict]) -> tuple[Side, float]:
-        """Weighted fusion of agent verdicts into (side, confidence)."""
-        score = 0.0
-        for name, verdict in verdicts.items():
-            payload = verdict.payload
-            if name == "technical":
-                bias = Bias(payload["bias"])
-                sign = 1.0 if bias == Bias.LONG else -1.0 if bias == Bias.SHORT else 0.0
-                score += self.settings.weight_technical * sign * payload["conviction"]
-            elif name == "sentiment":
-                score += self.settings.weight_sentiment * payload["score"]
-            elif name == "dxy":
-                # Signed score agrees with gold_bias by schema; the bias
-                # gate is belt-and-braces so a wrong sign cannot count.
-                bias = Bias(payload["gold_bias"])
-                sign = 1.0 if bias == Bias.LONG else -1.0 if bias == Bias.SHORT else 0.0
-                score += self.settings.weight_sentiment * sign * abs(payload["score"])
-            else:  # regime
-                # Prefer the explicit trend_direction (§13); fall back to
-                # the legacy regime enum mapping for older payloads.
-                direction = payload.get("trend_direction")
-                if direction == "up":
-                    sign = 1.0
-                elif direction == "down":
-                    sign = -1.0
-                elif direction == "flat":
-                    sign = 0.0
-                else:
-                    regime = Regime(payload["regime"])
-                    sign = (
-                        1.0
-                        if regime == Regime.TRENDING_UP
-                        else -1.0
-                        if regime == Regime.TRENDING_DOWN
-                        else 0.0
-                    )
-                score += self.settings.weight_regime * sign * payload["trend_strength"]
-        threshold = self.settings.side_threshold
-        if score >= threshold:
-            side = Side.LONG
-        elif score <= -threshold:
-            side = Side.SHORT
-        else:
-            side = Side.NEUTRAL
-        return side, min(1.0, abs(score))
+    def _fuse(self, verdicts: dict[str, AgentVerdict]) -> FusionResult:
+        """Weighted fusion of agent verdicts (spec §16).
+
+        Returns the signed direction_score, raw_confidence and every
+        agent's weighted contribution — never one opaque number.
+        """
+        return fuse_verdicts(verdicts, self.settings)
 
     def _record_tracks(self, verdicts: dict[str, AgentVerdict], snap: MarketSnapshot) -> None:
         """Reliability tracking (spec §15) — analysis-only, best-effort."""
@@ -228,19 +194,24 @@ class Orchestrator:
         if block_reason:
             return Rejection(symbol=symbol, reason=block_reason), verdicts, entry, snap.dxy
 
-        side, confidence = self._fuse(verdicts)
+        # Deterministic fusion context (spec §16-§21): setup quality,
+        # conflict report and confidence calibration — the risk engine's
+        # no-trade gates consume it; it never overrides a hard gate.
+        fusion = self._fuse(verdicts)
+        fusion_context = build_fusion_context(snap, verdicts, self.settings, htf_tf)
         last = snap.candles[timeframe].iloc[-1]
         result = self.risk.evaluate(
             symbol=symbol,
             timeframe=timeframe,
-            side=side,
-            confidence=confidence,
+            side=fusion.side,
+            confidence=fusion.raw_confidence,
             price=float(last["close"]),
             atr=float(entry["atr_14"]),
             verdicts=verdicts,
             gauge=snap.dxy,
             htf_bias=htf_bias,
             context=snap.context_for_risk(),
+            fusion_context=fusion_context,
         )
         return result, verdicts, entry, snap.dxy
 

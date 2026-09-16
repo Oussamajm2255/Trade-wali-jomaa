@@ -29,9 +29,11 @@ def test_all_bullish_verdicts_fuse_long() -> None:
         "regime": v("regime", {"regime": "trending_up", "trend_strength": 0.8}),
         "sentiment": v("sentiment", {"score": 0.6}),
     }
-    side, confidence = orch._fuse(verdicts)
-    assert side == Side.LONG
-    assert confidence == pytest.approx(0.45 * 0.8 + 0.35 * 0.8 + 0.20 * 0.6)
+    fusion = orch._fuse(verdicts)
+    assert fusion.side == Side.LONG
+    assert fusion.direction_score == pytest.approx(0.45 * 0.8 + 0.35 * 0.8 + 0.20 * 0.6)
+    assert fusion.raw_confidence == pytest.approx(abs(fusion.direction_score))
+    assert set(fusion.contributions) == {"technical", "regime", "sentiment"}
 
 
 def test_all_bearish_verdicts_fuse_short() -> None:
@@ -41,8 +43,9 @@ def test_all_bearish_verdicts_fuse_short() -> None:
         "regime": v("regime", {"regime": "trending_down", "trend_strength": 0.9}),
         "sentiment": v("sentiment", {"score": -0.8}),
     }
-    side, _ = orch._fuse(verdicts)
-    assert side == Side.SHORT
+    fusion = orch._fuse(verdicts)
+    assert fusion.side == Side.SHORT
+    assert fusion.direction_score < 0
 
 
 def test_mixed_weak_verdicts_fuse_neutral() -> None:
@@ -52,8 +55,8 @@ def test_mixed_weak_verdicts_fuse_neutral() -> None:
         "regime": v("regime", {"regime": "ranging", "trend_strength": 0.2}),
         "sentiment": v("sentiment", {"score": 0.1}),
     }
-    side, _ = orch._fuse(verdicts)
-    assert side == Side.NEUTRAL
+    fusion = orch._fuse(verdicts)
+    assert fusion.side == Side.NEUTRAL
 
 
 def test_missing_agent_reduces_score_not_crash() -> None:
@@ -61,10 +64,10 @@ def test_missing_agent_reduces_score_not_crash() -> None:
     verdicts = {
         "technical": v("technical", {"bias": "long", "conviction": 0.5}),
     }
-    side, confidence = orch._fuse(verdicts)
+    fusion = orch._fuse(verdicts)
     # 0.45*0.5 = 0.225 < 0.25 threshold -> neutral
-    assert side == Side.NEUTRAL
-    assert confidence == pytest.approx(0.225)
+    assert fusion.side == Side.NEUTRAL
+    assert fusion.raw_confidence == pytest.approx(0.225)
 
 
 def test_technical_fallback_bullish_alignment() -> None:
@@ -114,9 +117,9 @@ def test_dxy_verdict_fuses_like_sentiment() -> None:
         "regime": v("regime", {"regime": "trending_up", "trend_strength": 0.8}),
         "dxy": v("dxy", {"gold_bias": "long", "score": 0.6}),
     }
-    side, confidence = orch._fuse(verdicts)
-    assert side == Side.LONG
-    assert confidence == pytest.approx(0.45 * 0.8 + 0.35 * 0.8 + 0.20 * 0.6)
+    fusion = orch._fuse(verdicts)
+    assert fusion.side == Side.LONG
+    assert fusion.raw_confidence == pytest.approx(0.45 * 0.8 + 0.35 * 0.8 + 0.20 * 0.6)
 
 
 def test_regime_trend_direction_flat_overrides_enum() -> None:
@@ -129,9 +132,9 @@ def test_regime_trend_direction_flat_overrides_enum() -> None:
         "technical": v("technical", {"bias": "neutral", "conviction": 0.1}),
         "sentiment": v("sentiment", {"score": 0.0}),
     }
-    side, confidence = orch._fuse(verdicts)
-    assert side == Side.NEUTRAL
-    assert confidence == pytest.approx(0.0)
+    fusion = orch._fuse(verdicts)
+    assert fusion.side == Side.NEUTRAL
+    assert fusion.raw_confidence == pytest.approx(0.0)
 
 
 def test_failure_block_policy() -> None:

@@ -158,6 +158,41 @@ class Settings(BaseSettings):
     # never modified from this data.
     agent_reliability_window: int = 200
 
+    # --- Setup quality engine (INTELLIGENCE_V2 — phase 4, spec §18) ---
+    # Deterministic 7-component score (mtf/structure/regime/dxy/
+    # volatility/session/risk_reward). Proposals below this are refused
+    # with no_trade_reason=LOW_SETUP_QUALITY.
+    setup_quality_min: float = 0.45
+
+    # --- Conflict detection (spec §19) ---
+    # Contradictions between the fused direction and the deterministic
+    # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.
+    # CONFLICTED blocks new proposals by default; when blocking is off it
+    # takes the capped quality penalty instead. MIXED always reduces the
+    # setup-quality score by conflict_penalty_per_axis per conflict.
+    conflict_conflicted_min: int = 2
+    conflict_block_conflicted: bool = True
+    conflict_penalty_per_axis: float = 0.15
+    conflict_max_penalty: float = 0.4
+
+    # --- No-trade gates (spec §20) ---
+    # HIGH_VOLATILITY is opt-in (phase 2 shipped high-vol without a
+    # block). BAD_SPREAD only fires when the data provider supplies a
+    # spread and the threshold is > 0 (MT5 gauge). STATISTICAL_EDGE_
+    # UNKNOWN must stay off until the outcome engine (phase 5) produces
+    # calibrated confidence.
+    no_trade_high_volatility: bool = False
+    no_trade_max_spread_pct: float = 0.0
+    require_statistical_edge: bool = False
+
+    # --- Confidence calibration (spec §21) ---
+    # calibrated_confidence = historical win rate inside the signal's own
+    # 0.05-wide raw-confidence bucket, and only once BOTH sample minimums
+    # hold. Until then it is None and the product must not claim it.
+    calibration_window: int = 500
+    calibration_min_samples: int = 50
+    calibration_min_per_bin: int = 10
+
     @field_validator("symbols", mode="before")
     @classmethod
     def _normalise_symbols(cls, value: object) -> str:

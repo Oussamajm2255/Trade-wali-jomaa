@@ -142,9 +142,26 @@ def _print_verdicts(verdicts: dict, snapshot: dict, gauge: dict | None) -> None:
 
 def _print_proposal(proposal: SignalProposal, pending_id: str | None = None) -> None:
     side_style = "green" if proposal.side.value == "long" else "red"
+    fusion_line = (
+        f"dir {proposal.direction_score:+.2f} | raw confidence {proposal.raw_confidence:.2f}"
+    )
+    if proposal.calibrated_confidence is not None:
+        fusion_line += f" | calibrated {proposal.calibrated_confidence:.2f}"
+    else:
+        fusion_line += " | calibrated n/a (needs outcomes)"
+    if proposal.setup_quality:
+        sq = proposal.setup_quality
+        comps = ", ".join(f"{k} {v:.2f}" for k, v in sq.get("components", {}).items())
+        fusion_line += f"\nsetup quality {sq.get('score'):.2f} [{comps}]"
+    if proposal.conflicts:
+        fusion_line += (
+            f"\nconflicts: {proposal.conflicts.get('state')} "
+            f"(score {proposal.conflicts.get('conflict_score')})"
+        )
     panel = Panel.fit(
         f"[bold {side_style}]{proposal.side.value.upper()}[/] {proposal.symbol} "
         f"(confidence {proposal.confidence:.2f}, model: {proposal.model})\n"
+        f"{fusion_line}\n"
         f"entry {proposal.entry:,.8g} | stop {proposal.stop:,.8g} | target {proposal.target:,.8g}\n"
         f"size {proposal.size:,.8g} | risk {proposal.risk_amount:.2f} USD | RR {proposal.expected_rr:.1f}\n\n"
         f"[dim]{proposal.rationale}[/]",
@@ -183,9 +200,15 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         console.print(f"[red]{exc}[/]")
         sys.exit(1)
     if isinstance(result, Rejection):
-        console.print(f"[yellow]{args.symbol}: no trade — {result.reason}[/]")
+        if result.no_trade_reason:
+            console.print(
+                f"[yellow]{args.symbol}: no trade ({result.no_trade_reason}) — {result.reason}[/]"
+            )
+        else:
+            console.print(f"[yellow]{args.symbol}: no trade — {result.reason}[/]")
         actions.audit("INFO", "proposal_rejected_by_risk",
-                      {"symbol": args.symbol, "reason": result.reason})
+                      {"symbol": args.symbol, "reason": result.reason,
+                       "no_trade_reason": result.no_trade_reason})
         return
     proposal_id = actions.save_proposal(result)
     if args.json:

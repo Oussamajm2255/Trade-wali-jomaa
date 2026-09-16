@@ -3,6 +3,11 @@
 The LLM proposes; this module disposes. Every gate is hard-coded,
 unit-tested and audit-logged. Kill-switch state is persisted, so a halt
 survives restarts.
+
+Phase 4 (spec §20): the no-trade gates — LOW_CONFIDENCE, LOW_SETUP_
+QUALITY, deterministic conflicts, HIGH_VOLATILITY, BAD_SPREAD and
+STATISTICAL_EDGE_UNKNOWN — consume the fusion context and refuse
+proposals with a classified no_trade_reason.
 """
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from trading_agent.config import Settings
+from trading_agent.fusion.types import ConflictState, FusionContext, NoTradeReason
 from trading_agent.schema.types import AgentVerdict, Rejection, Side, SignalProposal
 from trading_agent.store.db import session_scope
 from trading_agent.store.models import AuditLog, Position, RiskState
@@ -138,6 +144,7 @@ class RiskEngine:
         gauge: dict | None,
         htf_bias: dict | None = None,
         context: dict | None = None,
+        fusion_context: FusionContext | None = None,
     ) -> SignalProposal | Rejection:
         """Apply every hard gate; return a proposal or a logged rejection."""
         with session_scope() as session:
@@ -152,7 +159,13 @@ class RiskEngine:
                 return Rejection(
                     symbol=symbol,
                     reason=f"confidence {confidence:.2f} below minimum {self.s.min_confidence}",
+                    no_trade_reason=NoTradeReason.LOW_CONFIDENCE.value,
                 )
+
+            # --- No-trade gates (spec §20), fusion-layer inputs. ---
+            no_trade = self._no_trade_rejection(symbol, fusion_context)
+            if no_trade:
+                return no_trade
 
             # DXY concurrency hard gate (gold): the dollar must agree with
             # the trade direction or the signal is refused — no exceptions.
@@ -233,11 +246,31 @@ class RiskEngine:
             }
             if context:
                 evidence["context"] = context
+            if fusion_context:
+                evidence["fusion"] = {
+                    "direction_score": fusion_context.fusion.direction_score,
+                    "raw_confidence": fusion_context.fusion.raw_confidence,
+                    "contributions": fusion_context.fusion.contributions,
+                    "setup_quality": fusion_context.setup_quality.model_dump(),
+                    "conflict": fusion_context.conflict.model_dump(),
+                    "calibrated_confidence": fusion_context.calibrated_confidence,
+                }
             return SignalProposal(
                 symbol=symbol,
                 timeframe=timeframe,
                 side=side,
                 confidence=round(confidence, 4),
+                direction_score=(
+                    round(fusion_context.fusion.direction_score, 4) if fusion_context else 0.0
+                ),
+                raw_confidence=round(confidence, 4),
+                setup_quality=(
+                    fusion_context.setup_quality.model_dump() if fusion_context else None
+                ),
+                conflicts=fusion_context.conflict.model_dump() if fusion_context else None,
+                calibrated_confidence=(
+                    fusion_context.calibrated_confidence if fusion_context else None
+                ),
                 entry=round(price, 8),
                 stop=round(stop, 8),
                 target=round(target, 8),
@@ -248,6 +281,68 @@ class RiskEngine:
                 evidence=evidence,
                 model="+".join(models) if models else "unknown",
             )
+
+    def _no_trade_rejection(
+        self, symbol: str, fusion: FusionContext | None
+    ) -> Rejection | None:
+        """Fusion-layer no-trade gates (spec §20).
+
+        Returns a classified Rejection or None. Order is deliberate:
+        conflicts first (a strong deterministic contradiction is the
+        most serious refusal), then setup quality, then the opt-in
+        HIGH_VOLATILITY / BAD_SPREAD / STATISTICAL_EDGE_UNKNOWN gates.
+        """
+        if not fusion:
+            return None
+        conflict = fusion.conflict
+        if (
+            conflict.state == ConflictState.CONFLICTED
+            and self.s.conflict_block_conflicted
+        ):
+            axes = ", ".join(sorted({c.axis for c in conflict.conflicts}))
+            details = "; ".join(c.detail for c in conflict.conflicts)
+            reason = conflict.dominant_reason
+            return Rejection(
+                symbol=symbol,
+                reason=f"deterministic conflicts on {len(conflict.conflicts)} axis(es) "
+                f"({axes}): {details}",
+                no_trade_reason=reason.value if reason else None,
+            )
+        if fusion.setup_quality.score < self.s.setup_quality_min:
+            return Rejection(
+                symbol=symbol,
+                reason=(
+                    f"setup quality {fusion.setup_quality.score:.2f} below minimum "
+                    f"{self.s.setup_quality_min} ({fusion.setup_quality.detail})"
+                ),
+                no_trade_reason=NoTradeReason.LOW_SETUP_QUALITY.value,
+            )
+        if self.s.no_trade_high_volatility and fusion.regime == "high_volatility":
+            return Rejection(
+                symbol=symbol,
+                reason="deterministic regime is high_volatility",
+                no_trade_reason=NoTradeReason.HIGH_VOLATILITY.value,
+            )
+        if (
+            self.s.no_trade_max_spread_pct > 0
+            and fusion.spread_pct is not None
+            and fusion.spread_pct > self.s.no_trade_max_spread_pct
+        ):
+            return Rejection(
+                symbol=symbol,
+                reason=(
+                    f"spread {fusion.spread_pct:.2f}% above maximum "
+                    f"{self.s.no_trade_max_spread_pct}%"
+                ),
+                no_trade_reason=NoTradeReason.BAD_SPREAD.value,
+            )
+        if self.s.require_statistical_edge and fusion.calibrated_confidence is None:
+            return Rejection(
+                symbol=symbol,
+                reason="statistical edge unknown: calibration data insufficient",
+                no_trade_reason=NoTradeReason.STATISTICAL_EDGE_UNKNOWN.value,
+            )
+        return None
 
     @staticmethod
     def _rationale(verdicts: dict[str, AgentVerdict], gauge: dict | None) -> str:

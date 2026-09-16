@@ -120,13 +120,25 @@ class AgentVerdict(BaseModel):
 
 
 class SignalProposal(BaseModel):
-    """A risk-approved trade proposal awaiting human approval."""
+    """A risk-approved trade proposal awaiting human approval.
+
+    Phase 4 (spec §16-§21): direction_score / raw_confidence / setup
+    quality / conflicts are stored separately — never one opaque number.
+    `confidence` is kept for backward compatibility and equals
+    raw_confidence. calibrated_confidence is None until the outcome
+    engine (phase 5) provides enough evaluated history.
+    """
 
     id: str | None = None
     symbol: str
     timeframe: str
     side: Side
     confidence: float = Field(ge=0.0, le=1.0)
+    direction_score: float = 0.0  # signed fusion score, -1..1 (§16)
+    raw_confidence: float = 0.0  # abs(direction_score), never a probability (§21)
+    setup_quality: dict | None = None  # deterministic engine verdict (§18)
+    conflicts: dict | None = None  # deterministic conflict report (§19)
+    calibrated_confidence: float | None = None  # from historical outcomes (§21)
     entry: float
     stop: float
     target: float
@@ -145,4 +157,7 @@ class Rejection(BaseModel):
 
     symbol: str
     reason: str
+    # NO-TRADE classification (spec §20): one of the NoTradeReason codes
+    # when the refusal is a deliberate no-trade decision.
+    no_trade_reason: str | None = None
     created_at: datetime = Field(default_factory=utcnow)

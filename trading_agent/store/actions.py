@@ -217,6 +217,25 @@ def agent_reliability(agent: str | None = None, limit: int = 200) -> dict:
     return {"window": limit, "agents": by_agent}
 
 
+def evaluated_outcomes(agent: str | None = None, limit: int = 500) -> list[dict]:
+    """(confidence, correct) pairs for verdicts whose outcome is known.
+
+    Feeds the confidence-calibration infrastructure (spec §21). The
+    outcome engine (phase 5) fills `actual_outcome`/`correct`; until it
+    does this returns [] and calibrated confidence stays None.
+    """
+    with session_scope() as session:
+        query = select(AgentTrack).where(AgentTrack.correct.is_not(None))
+        if agent:
+            query = query.where(AgentTrack.agent == agent)
+        rows = list(session.scalars(query.order_by(AgentTrack.ts.desc()).limit(limit)))
+    return [
+        {"confidence": row.confidence, "correct": row.correct}
+        for row in rows
+        if row.confidence is not None
+    ]
+
+
 def _to_signal(row: Proposal) -> SignalProposal:
     return SignalProposal(
         id=row.id,
