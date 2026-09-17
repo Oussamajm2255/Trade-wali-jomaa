@@ -13,12 +13,14 @@ from dataclasses import dataclass, field
 # Setup-quality components (spec §18) with human-readable labels.
 _COMPONENT_LABELS = {
     "mtf": "alignement MTF",
+    "mtf_alignment": "alignement MTF",
     "structure": "structure de marché",
     "regime": "régime",
     "dxy": "contexte DXY",
     "volatility": "volatilité",
     "session": "session",
     "risk_reward": "ratio risque/rendement",
+    "location": "emplacement (liquidité/VWAP)",
 }
 
 _SUPPORT_MIN = 0.6

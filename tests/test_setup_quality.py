@@ -53,10 +53,11 @@ def test_perfect_long_setup_scores_high(settings: Settings) -> None:
     )
     quality = compute_setup_quality(Side.LONG, snap, settings)
     # mtf 1.0 | structure 0.9 | regime 1.0 | dxy 1.0 | vol 0.9 |
-    # session 1.0 | rr 1.0 (room 40 / stop 20 == take_profit_rr)
+    # session 1.0 | rr 1.0 (room 40 / stop 20 == take_profit_rr) |
+    # location 0.5 (no Phase B blocks on this snap -> neutral)
     expected = (
-        0.20 * 1.0 + 0.15 * 0.9 + 0.20 * 1.0 + 0.15 * 1.0
-        + 0.10 * 0.9 + 0.10 * 1.0 + 0.10 * 1.0
+        0.18 * 1.0 + 0.12 * 0.9 + 0.18 * 1.0 + 0.12 * 1.0
+        + 0.09 * 0.9 + 0.09 * 1.0 + 0.07 * 1.0 + 0.15 * 0.5
     )
     assert quality.score == pytest.approx(expected)
     assert quality.components["risk_reward"] == 1.0
@@ -134,4 +135,5 @@ def test_missing_context_degrades_to_neutral(settings: Settings) -> None:
         "volatility": 0.5,
         "session": 0.5,
         "risk_reward": 0.5,
+        "location": 0.5,
     }

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from trading_agent.config import Settings
 from trading_agent.data.calendar import blocking_events
 from trading_agent.data.shock import ShockState
+from trading_agent.fusion.room import compute_room
 from trading_agent.fusion.types import ConflictState, FusionContext, NoTradeReason
 from trading_agent.schema.types import AgentVerdict, Rejection, Side, SignalProposal
 from trading_agent.store.db import session_scope
@@ -260,6 +261,16 @@ class RiskEngine:
                 mark("no_trade", "reject", f"{no_trade.no_trade_reason or 'no_trade'}: {no_trade.reason}")
                 return no_trade
 
+            # --- Room-to-target gate (V-MONSTER §29, Phase C). ---
+            # The distance to the opposing liquidity pool, after spread
+            # and slippage, must leave at least room_min_rr R. No mapped
+            # opposing level never blocks (data honesty, spec §4).
+            room = self._room_gate(symbol, side, price, atr, context, fusion_context)
+            if room:
+                mark("room", "reject", room.reason)
+                return room
+            mark("room", "pass")
+
             # --- Statistical quality gate (spec §32), opt-in. ---
             # Pipeline order (spec): AI SIGNAL -> SETUP QUALITY ->
             # STATISTICAL QUALITY -> HARD RISK ENGINE. Unknown history
@@ -417,6 +428,40 @@ class RiskEngine:
                 evidence=evidence,
                 model="+".join(models) if models else "unknown",
             )
+
+    def _room_gate(
+        self,
+        symbol: str,
+        side: Side,
+        price: float,
+        atr: float,
+        context: dict | None,
+        fusion: FusionContext | None,
+    ) -> Rejection | None:
+        """Room-to-target gate (V-MONSTER §29): INSUFFICIENT_ROOM.
+
+        Only fires when the liquidity map found an opposing level and
+        the after-cost room is below room_min_rr. No data never blocks.
+        """
+        if not self.s.room_gate_enabled:
+            return None
+        room = compute_room(
+            side,
+            price,
+            atr,
+            (context or {}).get("liquidity") or {},
+            spread_pct=fusion.spread_pct if fusion else None,
+            slippage_pct=self.s.slippage * 100.0,
+            stop_mult=self.s.atr_stop_mult,
+            min_room_rr=self.s.room_min_rr,
+        )
+        if room["insufficient"]:
+            return Rejection(
+                symbol=symbol,
+                reason=f"insufficient room to target: {room['reason']}",
+                no_trade_reason=NoTradeReason.INSUFFICIENT_ROOM.value,
+            )
+        return None
 
     def _no_trade_rejection(
         self, symbol: str, fusion: FusionContext | None

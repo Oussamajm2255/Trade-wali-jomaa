@@ -128,14 +128,30 @@ push gate. No V2 behaviour changes without a test proving parity.
   session windows, VWAP calc, reclaim/rejection/trend, trust gating,
   snapshot wiring, proxy unavailability.
 
-### Phase C — Location quality + room-to-target (§28, §29)
-- `fusion/location.py` (new): LOCATION_QUALITY 0-1 from HTF structure,
-  liquidity distances, VWAP, premium/discount, FVG/OB proximity.
-- `fusion/room.py` (new): room-to-target vs opposing liquidity; reject
-  when room < spread + slippage + min RR (new NoTradeReason
-  INSUFFICIENT_ROOM in `risk/engine.py`).
-- Add both to setup_quality components + contribution + Telegram.
-- Tests: location scoring cases, room rejection cases.
+### Phase C — Location quality + room-to-target (§28, §29) — ✅ DELIVERED
+- `fusion/location.py` (new): LOCATION_QUALITY 0-1 as the mean of four
+  side-aware sub-scores — liquidity proximity (ATR bands), VWAP
+  relation (reclaimed/above/below/rejected mirrored per side),
+  premium/discount vs the session-range midpoint, and untested
+  FVG/OB shelter on the stop side. Duck-typed on the Phase B snapshot
+  blocks; neutral 0.5 when data is absent (never fabricated).
+- `fusion/room.py` (new): room-to-target vs the opposing liquidity pool
+  (nearest_above for LONG, nearest_below for SHORT); spread + slippage
+  subtracted from the raw distance before the R conversion; reject when
+  the after-cost room < `room_min_rr` R. New `NoTradeReason`
+  INSUFFICIENT_ROOM wired into `risk/engine.py` (`_room_gate`, after the
+  no-trade gates; `room_gate_enabled`/`room_min_rr` settings). No mapped
+  opposing level never blocks (data honesty, spec §4).
+- Both ride the existing plumbing: location is the 8th setup-quality
+  component (WEIGHTS rebalanced to sum 1.0) and joins the §47
+  contribution labels; the room rejection renders with its reason + code
+  in the Telegram rejection format.
+- Tests: location sub-score bands/mirroring/zone preference (6),
+  compute_room math + engine gate (12, incl. gate on/off, min RR,
+  spread from fusion, no-data pass), setup-quality weight formula;
+  backtest fixture gains deterministic pullbacks so the gate sees
+  realistic distances (chase-only monotonic series correctly trades 0,
+  documented by a dedicated test).
 
 ### Phase D — Market speed + displacement/trigger quality (§10, §27, §30)
 - `data/speed.py` (new): SLOW/NORMAL/FAST/EXTREME from range-per-minute
@@ -238,7 +254,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 421 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 442 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -265,8 +281,9 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase B — infrastructure.
-  Its confidence scores have no calibration guarantee yet; Phases K/L
+- **Current frontier**: the live bot is at Phase C — location quality
+  + room-to-target are live. Its confidence scores have no calibration
+  guarantee yet; Phases K/L
   are the first point at which scores claim meaning.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
   is marked unavailable in Telegram with the reason — it is never

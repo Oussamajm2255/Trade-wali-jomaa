@@ -173,10 +173,20 @@ class Settings(BaseSettings):
     agent_reliability_window: int = 200
 
     # --- Setup quality engine (INTELLIGENCE_V2 — phase 4, spec §18) ---
-    # Deterministic 7-component score (mtf/structure/regime/dxy/
-    # volatility/session/risk_reward). Proposals below this are refused
-    # with no_trade_reason=LOW_SETUP_QUALITY.
+    # Deterministic 8-component score (mtf/structure/regime/dxy/
+    # volatility/session/risk_reward/location). Proposals below this are
+    # refused with no_trade_reason=LOW_SETUP_QUALITY. `location` is the
+    # Phase C component (V-MONSTER §28): liquidity proximity, VWAP
+    # relation, premium/discount, FVG/OB support.
     setup_quality_min: float = 0.45
+
+    # --- Room-to-target gate (V-MONSTER §29, Phase C) ---
+    # The distance to the opposing liquidity level, after spread and
+    # slippage costs, must leave at least room_min_rr R of room —
+    # otherwise INSUFFICIENT_ROOM refuses the proposal. Only fires when
+    # the liquidity map found an opposing level; no data never blocks.
+    room_gate_enabled: bool = True
+    room_min_rr: float = 1.0
 
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic

@@ -1,6 +1,6 @@
 """Deterministic Setup Quality Engine (spec §18).
 
-Evaluates seven transparent components in 0..1 and returns a weighted
+Evaluates eight transparent components in 0..1 and returns a weighted
 score plus every component, so the system can explain exactly why a
 setup is good or poor. All inputs come from the canonical snapshot —
 the LLM has no input here. Direction is deliberately NOT a component
@@ -14,6 +14,8 @@ Component inputs (spec §18 list mapped to the documented JSON shape):
   volatility     - ATR percentile (expanded/contracted chop hurts entries)
   session        - session classification (overlap > London/NY > Asia)
   risk_reward    - room to the structural level vs the ATR stop distance
+  location       - Phase C (V-MONSTER §28): liquidity proximity, VWAP
+                   relation, premium/discount, FVG/OB support
 
 Spread and liquidity (listed in §18) feed the volatility and structure
 components respectively (ATR expansion and untested levels are their
@@ -23,19 +25,21 @@ engine consumes a real spread when the provider supplies one).
 from __future__ import annotations
 
 from trading_agent.config import Settings
+from trading_agent.fusion.location import compute_location_quality
 from trading_agent.fusion.types import SetupQuality
 from trading_agent.schema.types import Side
 
 # Weights sum to 1.0; documented and deterministic so a change is a
 # deliberate, versioned product decision.
 WEIGHTS = {
-    "mtf_alignment": 0.20,
-    "structure": 0.15,
-    "regime": 0.20,
-    "dxy": 0.15,
-    "volatility": 0.10,
-    "session": 0.10,
-    "risk_reward": 0.10,
+    "mtf_alignment": 0.18,
+    "structure": 0.12,
+    "regime": 0.18,
+    "dxy": 0.12,
+    "volatility": 0.09,
+    "session": 0.09,
+    "risk_reward": 0.07,
+    "location": 0.15,
 }
 
 # Deterministic regime label -> quality per side. Opposing trends are
@@ -204,6 +208,7 @@ def compute_setup_quality(side: Side, snapshot, settings: Settings) -> SetupQual
         "risk_reward": _risk_reward_component(
             side, price, atr, getattr(snapshot, "structure", {}) or {}, settings
         ),
+        "location": compute_location_quality(side, snapshot, settings),
     }
     score = round(
         sum(WEIGHTS[name] * value for name, value in components.items()), 4

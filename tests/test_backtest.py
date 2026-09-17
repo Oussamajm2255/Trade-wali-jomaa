@@ -46,11 +46,20 @@ def _settings(**overrides) -> Settings:
 
 
 def _gold_frame(n: int = 700, drift: float = 0.05, noise: float = 0.6) -> pd.DataFrame:
-    """A smooth 15m uptrend: drift + deterministic random-walk noise."""
+    """A smooth 15m uptrend with pullbacks: drift + wave + random-walk noise.
+
+    The deterministic sine wave creates retracements away from the
+    session highs, so the room-to-target gate (V-MONSTER §29) sees
+    realistic distances on pullback entries and only rejects chases at
+    the highs. A purely monotonic series would leave every liquidity
+    level within a stop's distance and the gate would (correctly)
+    refuse every entry.
+    """
     rng = np.random.default_rng(7)
     idx = pd.date_range("2026-01-01", periods=n, freq="15min", tz="UTC")
     base = 3000.0 * (1.0 + drift * np.linspace(0.0, 1.0, n))
-    close = base + np.cumsum(rng.normal(0.0, noise, n))
+    wave = 15.0 * np.sin(2 * np.pi * np.arange(n) / 48.0)
+    close = base + wave + np.cumsum(rng.normal(0.0, noise, n))
     open_ = np.empty(n)
     open_[0] = close[0] - 2.0
     open_[1:] = close[:-1]
@@ -161,6 +170,34 @@ def test_spread_is_charged_on_entry() -> None:
     pos = gold.index.get_loc(ts)
     expected = float(gold.iloc[pos + 1]["open"]) * (1 + 0.002 / 2)
     assert trade.entry == pytest.approx(expected, abs=1e-6)
+
+
+def test_room_gate_rejects_chasing_entries_in_backtest() -> None:
+    """A monotonic series leaves every liquidity level within a stop's
+    distance, so the room-to-target gate (V-MONSTER §29) rejects every
+    entry as a chase — the reason `_gold_frame()` adds pullbacks so the
+    gate has realistic distances to evaluate instead."""
+    rng = np.random.default_rng(7)
+    n = 700
+    idx = pd.date_range("2026-01-01", periods=n, freq="15min", tz="UTC")
+    base = 3000.0 * (1.0 + 0.05 * np.linspace(0.0, 1.0, n))
+    close = base + np.cumsum(rng.normal(0.0, 0.6, n))
+    open_ = np.empty(n)
+    open_[0] = close[0] - 2.0
+    open_[1:] = close[:-1]
+    gold = pd.DataFrame(
+        {"open": open_, "high": np.maximum(open_, close) + 3.0,
+         "low": np.minimum(open_, close) - 3.0, "close": close, "volume": 100.0},
+        index=idx,
+    )
+
+    gated = _engine(gold, _dxy_frame()).run()
+    assert gated.stats["trades"] == 0
+
+    settings = _settings()
+    settings.room_gate_enabled = False
+    ungated = _engine(gold, _dxy_frame(), settings=settings).run()
+    assert ungated.stats["trades"] >= 1
 
 
 # --- kill-switch parity --------------------------------------------------
