@@ -51,6 +51,7 @@ from trading_agent.execution.paper import PaperBroker
 from trading_agent.notify.dedup import RejectionDedup
 from trading_agent.notify.telegram import TelegramNotifier, agent_bias, agent_conviction
 from trading_agent.risk.engine import RiskEngine
+from trading_agent.supervision import supervise_pending
 from trading_agent.schema.types import Rejection, SignalProposal
 from trading_agent.store import actions
 from trading_agent.store.db import init_engine, session_scope
@@ -255,6 +256,23 @@ def cmd_approve(args: argparse.Namespace) -> None:
     if position is None:
         console.print("[red]Could not open position.[/]")
         sys.exit(1)
+    # Phase I (§63): measure the human execution latency (signal sent ->
+    # position opened) and store it — its EMA feeds the Phase G timing
+    # model's reaction window.
+    try:
+        opened = position.opened_at or datetime.now(timezone.utc)
+        created = proposal.created_at
+        if created is not None:
+            # SQLite stores naive datetimes; normalise before subtracting.
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if opened.tzinfo is None:
+                opened = opened.replace(tzinfo=timezone.utc)
+            latency_s = (opened - created).total_seconds()
+            actions.record_user_latency(proposal.id, latency_s)
+            console.print(f"[dim]Latence d'exécution : {latency_s:.0f}s (alimente le modèle de timing).[/]")
+    except Exception as exc:  # noqa: BLE001 - feedback must never kill approval
+        logger.warning("user latency recording failed: %s", exc)
     console.print(
         f"[green]Position opened:[/] {proposal.symbol} {proposal.side.value.upper()} "
         f"size {proposal.size:,.8g} @ {position.entry:,.8g} "
@@ -1189,6 +1207,17 @@ def cmd_loop(args: argparse.Namespace) -> None:
                         f"[{style}]CLOSED {event['symbol']}: {event['exit_reason']} "
                         f"@ {event['exit_price']:,.8g} — PnL {event['pnl']:+,.2f} USD[/]"
                     )
+
+                # Phase I (§62): supervise pending proposals every tick.
+                # Telegram follow-ups fire only on state CHANGE (the
+                # store dedups); console prints the change too.
+                if settings.supervision_enabled:
+                    for follow in supervise_pending(symbol, float(candle["close"])):
+                        console.print(
+                            f"[cyan]SUIVI {symbol}: {follow['state']} — {follow['detail']}[/]"
+                        )
+                        if notifier.enabled:
+                            notifier.send_supervision(follow)
 
                 halted, reason = risk.is_halted()
                 if halted:

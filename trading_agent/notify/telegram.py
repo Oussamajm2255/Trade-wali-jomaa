@@ -120,6 +120,32 @@ class TelegramNotifier:
         )
         return self.send(text)
 
+    # Phase I (§62): supervision follow-ups, sent only on state CHANGE.
+    _SUPERVISION_LABELS = {
+        "VALID": "entrée toujours valable",
+        "DO_NOT_CHASE": "ne pas chasser l'entrée",
+        "INVALIDATED": "signal invalidé",
+        "EXPIRED": "signal expiré",
+    }
+
+    def supervision_message(self, event: dict) -> str:
+        """Concise follow-up when a pending proposal's state changes."""
+        state = event.get("state", "?")
+        label = self._SUPERVISION_LABELS.get(state, state)
+        lines = [
+            f"🔄 SUIVI {event.get('symbol', '?')} : {label}",
+            f"Détail : {event.get('detail', '')}",
+        ]
+        previous = event.get("previous_state")
+        if previous:
+            lines.append(f"État précédent : {previous}")
+        lines.append(f"Proposal : {event.get('proposal_id', '?')}")
+        return "\n".join(lines)
+
+    def send_supervision(self, event: dict) -> bool:
+        """Send a supervision follow-up (state-change only — dedup'd)."""
+        return self.send(self.supervision_message(event))
+
     def proposal_message(
         self,
         proposal: SignalProposal,

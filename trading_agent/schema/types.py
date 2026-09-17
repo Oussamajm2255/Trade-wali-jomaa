@@ -170,6 +170,12 @@ class SignalProposal(BaseModel):
     # predate the enum and stay byte-compatible with the DB.
     status: str = DecisionState.PENDING.value
     created_at: datetime = Field(default_factory=utcnow)
+    # Phase I (§62): supervision inputs stamped by the orchestrator from
+    # the timing payload — the actionability deadline and the max-chase
+    # half-width of the execution zone. None/0.0 = supervision falls
+    # back to the opportunity TTL / disabled chase.
+    actionability_deadline: datetime | None = None
+    max_chase: float = 0.0
 
 
 class Rejection(BaseModel):

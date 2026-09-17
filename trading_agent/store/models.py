@@ -43,6 +43,17 @@ class Proposal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase I (§62/§63): live supervision + execution feedback.
+    # deadline_at/max_chase come from the timing payload at save time;
+    # supervision_state/detail/supervised_at track the per-tick
+    # classification (VALID / DO_NOT_CHASE / INVALIDATED / EXPIRED);
+    # user_latency_s is the measured approve-to-execution latency.
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_chase: Mapped[float] = mapped_column(Float, default=0.0)
+    supervision_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    supervision_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supervised_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_latency_s: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     position: Mapped["Position | None"] = relationship(back_populates="proposal", uselist=False)
 

@@ -290,13 +290,29 @@ push gate. No V2 behaviour changes without a test proving parity.
 - Tests: tier rules (6), risk-engine gate + sizing caps (5),
   orchestrator stamping (3), Telegram label lines (4).
 
-### Phase I — Live signal supervision + human execution feedback (§62, §63)
-- After send: supervise proposal each tick until approved/expired —
-  ENTRY STILL VALID / DO NOT CHASE / INVALIDATED / EXPIRED states;
-  Telegram follow-ups only on state CHANGE (dedup'd, no spam).
-- `approve` command: capture execution price + timestamp; compute user
-  latency vs signal; store; EMA of user latency feeds Phase G model.
-- Tests: supervision transitions, latency capture.
+### Phase I — Live signal supervision + human execution feedback (§62, §63) ✅ DELIVERED
+- `supervision.py` (new): pure per-tick classification of pending
+  proposals — VALID / DO_NOT_CHASE (price beyond the execution zone) /
+  INVALIDATED (stop or target reached) / EXPIRED (actionability
+  deadline passed), priority EXPIRED > INVALIDATED > DO_NOT_CHASE.
+  No deadline never expires (spec §4).
+- The loop supervises every tick: state changes persist once (unchanged
+  ticks are a no-op — no DB write, no spam) and return exactly one
+  Telegram follow-up per change; the first None→VALID classification
+  is silent. INVALIDATED/EXPIRED move the proposal out of `pending` —
+  approving a dead signal is refused; DO_NOT_CHASE stays pending
+  (pullback entries remain possible).
+- The orchestrator stamps the timing payload's deadline + max-chase
+  zone on every proposal (`actionability_deadline` / `max_chase`, new
+  proposal columns, additive migration) so supervision has its inputs.
+- §63: `approve` measures the signal-to-execution latency and stores it
+  (`user_latency_s`); its EMA (`user_latency_ema`, span
+  `user_latency_ema_span`) overrides the Phase G reaction window in
+  `compute_timing` — the timing model learns the trader's real
+  reaction time (fail-open: no samples → configured budget).
+- Tests: state machine (12), persistence + dedup (4), latency EMA +
+  timing override (2), orchestrator stamping + EMA feed (2), Telegram
+  follow-up lines (2).
 
 ### Phase J — Forensics + counterfactual timing + rejected-setup outcomes (§65, §66, §67)
 - Post-signal snapshots at 1m/3m/5m/10m/30m (from loop, stored).
@@ -344,7 +360,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 549 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 571 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -371,12 +387,13 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase H — confidence tiers
-  (HIGH/MEDIUM/LOW from calibrated win rates) gate and size every
-  proposal, and every decision carries an A+/A/NO TRADE label. Phase G
-  is also live: timing quality, lead time / actionability deadline,
-  expected execution drift, the pre-send TOO_LATE gate and the
-  actionable-signal-rate KPI.
+- **Current frontier**: the live bot is at Phase I — pending proposals
+  are supervised every tick (VALID / DO_NOT_CHASE / INVALIDATED /
+  EXPIRED with change-only Telegram follow-ups), and the EMA of the
+  measured human execution latency feeds the Phase G timing model.
+  Phase H is also live: confidence tiers (HIGH/MEDIUM/LOW from
+  calibrated win rates) gate and size every proposal, and every
+  decision carries an A+/A/NO TRADE label.
   Its confidence scores have no
   calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.

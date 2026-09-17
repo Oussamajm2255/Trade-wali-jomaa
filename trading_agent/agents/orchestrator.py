@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable
 
 from trading_agent.agents.base import LLMClient
@@ -525,6 +525,17 @@ class Orchestrator:
         """
         indicators = (snap.indicators or {}).get(snap.entry_timeframe) or {}
         atr = float(indicators.get("atr_14") or 0.0)
+        # Phase I (§63): the EMA of the measured human approval latency
+        # overrides the configured reaction budget — the timing model
+        # learns the trader's real reaction time. Fail-open on no
+        # samples (None -> the configured budget).
+        latency_ema = None
+        try:
+            latency_ema = actions.user_latency_ema(
+                span=getattr(self.settings, "user_latency_ema_span", 10) or 10
+            )
+        except Exception:  # noqa: BLE001 - observation must never kill the cycle
+            latency_ema = None
         # The proposal's own side — never the fusion context's (the
         # context re-fuses the real verdicts, which may be NEUTRAL even
         # when the pipeline's fused side produced the proposal).
@@ -538,8 +549,16 @@ class Orchestrator:
             atr=atr,
             spread_pct=fusion_context.spread_pct,
             opportunity_age_min=(opp or {}).get("age_min"),
+            user_reaction_seconds=latency_ema,
             now=now,
         )
+        # Phase I (§62): the deadline and chase zone ride on the
+        # proposal so the loop's supervision can classify it per tick.
+        if isinstance(timing.get("deadline_epoch"), (int, float)):
+            proposal.actionability_deadline = datetime.fromtimestamp(
+                float(timing["deadline_epoch"]), tz=timezone.utc
+            )
+        proposal.max_chase = float(timing.get("max_chase") or 0.0)
         if opp is not None:
             opp["timing"] = timing
         # Phase H (V-MONSTER §58/§59/§81): confidence tier + quality

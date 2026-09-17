@@ -123,19 +123,26 @@ def compute_timing(
     spread_pct: float | None = None,
     opportunity_age_min: float | None = None,
     telegram_latency_s: float | None = None,
+    user_reaction_seconds: float | None = None,
     now: datetime | None = None,
 ) -> dict:
     """TIMING_QUALITY, lead time, deadline and expected execution drift.
 
     `snapshot` is duck-typed: it needs `structure`, `speed`, `liquidity`,
     `price` and `entry_timeframe` (the Phase C/D snapshot blocks).
+    `user_reaction_seconds` overrides the configured human reaction
+    budget (the Phase I EMA of measured approval latency feeds it).
     `now` anchors the deadline; None means wall-clock time.
     """
     now = now or utcnow()
     window = int(getattr(settings, "trigger_event_window", 12) or 12)
     ttl_min = float(getattr(settings, "opportunity_ttl_minutes", 720) or 720)
     min_rr = float(getattr(settings, "room_min_rr", 1.0) or 1.0)
-    reaction_s = float(getattr(settings, "user_reaction_seconds", 120.0) or 120.0)
+    if user_reaction_seconds is None:
+        user_reaction_seconds = float(
+            getattr(settings, "user_reaction_seconds", 120.0) or 120.0
+        )
+    reaction_s = float(user_reaction_seconds)
     if telegram_latency_s is None:
         telegram_latency_s = float(getattr(settings, "telegram_latency_s", 3.0) or 3.0)
     reaction_s += float(telegram_latency_s)

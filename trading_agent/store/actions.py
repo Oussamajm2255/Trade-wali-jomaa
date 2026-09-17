@@ -48,6 +48,10 @@ def save_proposal(proposal: SignalProposal) -> str:
             evidence=proposal.evidence,
             model=proposal.model,
             status=DecisionState.PENDING.value,
+            # Phase I (§62): the timing payload's deadline + chase zone,
+            # so supervision knows when the entry is no longer valid.
+            deadline_at=proposal.actionability_deadline,
+            max_chase=proposal.max_chase,
         )
         session.add(row)
         session.add(
@@ -70,6 +74,97 @@ def get_proposal(proposal_id: str) -> SignalProposal | None:
     with session_scope() as session:
         row = session.get(Proposal, proposal_id)
         return _to_signal(row) if row else None
+
+
+def pending_proposals(symbol: str | None = None) -> list[Proposal]:
+    """Pending proposals (Phase I supervision reads these each tick)."""
+    with session_scope() as session:
+        query = select(Proposal).where(Proposal.status == "pending")
+        if symbol:
+            query = query.where(Proposal.symbol == symbol)
+        return list(session.scalars(query))
+
+
+def update_supervision(
+    proposal_id: str,
+    state: str,
+    detail: str,
+    *,
+    terminal: bool = False,
+    now: datetime | None = None,
+) -> tuple[str | None, bool]:
+    """Persist one supervision tick; returns (previous_state, changed).
+
+    `changed` is True only when the state differs from the previous
+    tick — the exact dedup rule for Telegram follow-ups (spec §62).
+    Unchanged ticks are a no-op (no DB write, no audit). Terminal
+    states (INVALIDATED/EXPIRED) also move the proposal out of
+    `pending` so a dead signal can no longer be approved.
+    """
+    now = now or datetime.now(timezone.utc)
+    with session_scope() as session:
+        row = session.get(Proposal, proposal_id)
+        if row is None or row.status != "pending":
+            return None, False
+        previous = row.supervision_state
+        if previous == state:
+            return previous, False
+        row.supervision_state = state
+        row.supervision_detail = detail
+        row.supervised_at = now
+        if terminal:
+            row.status = DecisionState.EXPIRED.value
+            row.decided_at = now
+            row.decision_note = f"supervision: {state} — {detail}"
+        session.add(
+            AuditLog(
+                level="INFO" if not terminal else "WARNING",
+                event="proposal_supervised" if not terminal else "proposal_supervision_expired",
+                detail={"proposal_id": proposal_id, "state": state, "detail": detail},
+            )
+        )
+        return previous, True
+
+
+def record_user_latency(proposal_id: str, latency_s: float) -> None:
+    """Store the measured signal-to-execution latency (§63)."""
+    with session_scope() as session:
+        row = session.get(Proposal, proposal_id)
+        if row is None:
+            return
+        row.user_latency_s = max(0.0, float(latency_s))
+        session.add(
+            AuditLog(
+                level="INFO",
+                event="user_latency_recorded",
+                detail={"proposal_id": proposal_id, "latency_s": row.user_latency_s},
+            )
+        )
+
+
+def user_latency_ema(span: int = 10, limit: int = 200) -> float | None:
+    """EMA of the measured human approval latency (§63).
+
+    Fed into the Phase G reaction window so the timing model learns
+    the trader's real reaction time. None until at least one sample
+    exists; the caller falls back to `user_reaction_seconds`.
+    """
+    span = max(1, int(span or 10))
+    with session_scope() as session:
+        rows = session.scalars(
+            select(Proposal.user_latency_s)
+            .where(Proposal.user_latency_s.is_not(None))
+            .order_by(Proposal.decided_at.asc())
+            .limit(limit)
+        ).all()
+    samples = [float(r) for r in rows if r is not None]
+    if not samples:
+        return None
+    alpha = 2.0 / (span + 1.0)
+    ema = samples[0]
+    for s in samples[1:]:
+        ema = alpha * s + (1.0 - alpha) * ema
+    return round(ema, 3)
 
 
 def list_proposals(status: str | None = None, symbol: str | None = None, limit: int = 20) -> list[SignalProposal]:
@@ -362,4 +457,6 @@ def _to_signal(row: Proposal) -> SignalProposal:
         model=row.model,
         status=row.status,
         created_at=row.created_at,
+        actionability_deadline=row.deadline_at,
+        max_chase=row.max_chase or 0.0,
     )

@@ -49,6 +49,18 @@ def _migrate_sqlite(engine: Engine) -> None:
         columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(positions)")}
         if columns and "broker_ticket" not in columns:
             conn.exec_driver_sql("ALTER TABLE positions ADD COLUMN broker_ticket INTEGER")
+        # Phase I (§62/§63): live supervision + execution feedback on proposals.
+        prop_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(proposals)")}
+        for name, sqltype in (
+            ("deadline_at", "DATETIME"),
+            ("max_chase", "FLOAT"),
+            ("supervision_state", "VARCHAR(16)"),
+            ("supervision_detail", "TEXT"),
+            ("supervised_at", "DATETIME"),
+            ("user_latency_s", "FLOAT"),
+        ):
+            if prop_columns and name not in prop_columns:
+                conn.exec_driver_sql(f"ALTER TABLE proposals ADD COLUMN {name} {sqltype}")
         # Phase 5 (§23): outcome-engine tracking on positions.
         additive = [
             ("mfe_price", "FLOAT"),

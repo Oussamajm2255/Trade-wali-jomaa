@@ -269,6 +269,14 @@ class Settings(BaseSettings):
     a_plus_timing_min: float = 0.7  # timing floor for A+
     a_plus_room_min_r: float = 2.0  # room-to-target floor for A+
 
+    # --- Live signal supervision + execution feedback (V-MONSTER §62/§63, Phase I) ---
+    # Pending proposals are supervised each tick until approved/expired
+    # (VALID / DO_NOT_CHASE / INVALIDATED / EXPIRED); Telegram follow-ups
+    # fire on state CHANGE only. The EMA of the measured human approval
+    # latency feeds the Phase G reaction window.
+    supervision_enabled: bool = True
+    user_latency_ema_span: int = 10  # EMA window for the reaction model
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.
