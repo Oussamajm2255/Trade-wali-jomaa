@@ -9,6 +9,7 @@ send is best-effort: a failed notification must never break the loop.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from trading_agent.analytics.contribution import feature_contribution
@@ -66,6 +67,9 @@ def agent_conviction(payload: dict) -> float | None:
 class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
+        # Phase A (V-MONSTER §5): last send round-trip in ms (0 = never
+        # sent) — logged per cycle and available for health checks.
+        self.last_latency_ms = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -75,14 +79,17 @@ class TelegramNotifier:
         """Send a message; best-effort, never raises."""
         if not self.enabled:
             return False
+        start = time.monotonic()
         try:
             import httpx
 
             url = f"{API_BASE}/bot{self.s.telegram_bot_token}/sendMessage"
             resp = httpx.post(url, json={"chat_id": self.s.telegram_chat_id, "text": text}, timeout=10)
             resp.raise_for_status()
+            self.last_latency_ms = (time.monotonic() - start) * 1000
             return True
         except Exception as exc:  # noqa: BLE001 - network failures are non-fatal
+            self.last_latency_ms = (time.monotonic() - start) * 1000
             logger.warning("telegram send failed: %s", exc)
             return False
 

@@ -47,6 +47,9 @@ class DataQuality:
     state: QualityState = QualityState.PASS
     issues: list[str] = field(default_factory=list)
     checks: dict[str, str] = field(default_factory=dict)  # check name -> state
+    # Age of the freshest observation in seconds (Phase A metric), or
+    # None when the source carries no timestamp.
+    age_s: float | None = None
 
     def add(self, check: str, state: QualityState, issue: str) -> "DataQuality":
         self.checks[check] = state.value
@@ -62,12 +65,17 @@ def validate_candles(
     min_candles: int = 60,
     max_stale_multiple: float = 3.0,
     now: pd.Timestamp | None = None,
+    clock_tolerance_s: float = 60.0,
 ) -> DataQuality:
     """Validate one OHLCV frame: ordering, duplicates, OHLC sanity, history, freshness.
 
     `now` defaults to wall-clock time; historical replays (backtesting)
     pass the replay timestamp so staleness is judged against the moment
     the signal would have been made — never against today.
+
+    Phase A (V-MONSTER §4/§77): the freshest observation's age is
+    recorded on the result (`age_s`) and market timestamps ahead of the
+    local clock beyond `clock_tolerance_s` flag a clock-skew issue.
     """
     q = DataQuality()
     if df is None or len(df) == 0:
@@ -93,11 +101,19 @@ def validate_candles(
     if now_ts.tzinfo is None:
         now_ts = now_ts.tz_localize("UTC")
     age = now_ts - last_ts
+    q.age_s = float(age.total_seconds())
     if age > max_stale_multiple * pd.Timedelta(CANDLE_DURATION.get(timeframe, "1h")):
         q.add(
             "stale",
             QualityState.DEGRADED,
             f"last candle is {age} old (> {max_stale_multiple}x {timeframe})",
+        )
+    skew = last_ts - now_ts
+    if skew > pd.Timedelta(seconds=clock_tolerance_s):
+        q.add(
+            "clock_skew",
+            QualityState.DEGRADED,
+            f"market timestamp {skew} ahead of local clock (> {clock_tolerance_s}s)",
         )
     return q
 

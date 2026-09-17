@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     data_quality_min_candles: int = 60
     data_quality_max_stale_multiple: float = 3.0  # last candle age vs TF duration
     data_quality_allow_degraded: bool = True
+    # Phase A (V-MONSTER): market timestamps ahead of the local clock by
+    # more than this = provider/clock skew -> degraded (clock integrity).
+    data_clock_tolerance_s: int = 60
     dxy_max_age_hours: int = 48  # older DXY gauge = degraded
 
     # --- Deterministic regime engine (INTELLIGENCE_V2 — phase 2) ---

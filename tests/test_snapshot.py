@@ -115,6 +115,16 @@ def test_snapshot_carries_phase2_deterministic_context() -> None:
     assert entry["dxy_context"]["source"] == "gauge only"
 
 
+def test_snapshot_carries_phase_a_latency_metrics() -> None:
+    snap = build_market_snapshot(FakeMarket(gauge=fresh_gauge()), "XAUUSD", make_settings(), "15m")
+    assert snap.data_latency_ms >= 0
+    assert snap.data_age_s is not None and snap.data_age_s >= 0
+    entry = snap.entry_snapshot_for_llm()
+    # Metrics ride into the LLM dict -> stored with every signal record.
+    assert entry["data_age_s"] == snap.data_age_s
+    assert entry["data_latency_ms"] == round(snap.data_latency_ms, 1)
+
+
 def test_snapshot_with_intraday_dxy_candles() -> None:
     dxy = make_df(100, "15m")
     snap = build_market_snapshot(

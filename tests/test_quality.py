@@ -100,6 +100,32 @@ def test_stale_frame_degrades() -> None:
     assert any("stale" in i for i in q.issues)
 
 
+def test_fresh_frame_records_age_seconds() -> None:
+    q = validate_candles(make_df(), "15m")
+    assert q.age_s is not None and q.age_s >= 0
+
+
+def test_age_anchored_to_replay_timestamp() -> None:
+    replay_now = pd.Timestamp("2026-09-01 12:00", tz="UTC")
+    df = make_df(end=replay_now - pd.Timedelta(minutes=5))
+    q = validate_candles(df, "15m", now=replay_now)
+    assert q.age_s == 300.0
+    assert q.state == QualityState.PASS
+
+
+def test_future_market_timestamp_flags_clock_skew() -> None:
+    future = pd.Timestamp.now(tz="UTC") + pd.Timedelta(minutes=5)
+    q = validate_candles(make_df(end=future), "15m", clock_tolerance_s=60.0)
+    assert q.state == QualityState.DEGRADED
+    assert any("clock_skew" in i for i in q.issues)
+
+
+def test_small_clock_skew_within_tolerance_passes() -> None:
+    near_future = pd.Timestamp.now(tz="UTC") + pd.Timedelta(seconds=30)
+    q = validate_candles(make_df(end=near_future), "15m", clock_tolerance_s=60.0)
+    assert q.state == QualityState.PASS
+
+
 # ------------------------------------------------------------ gauge
 
 def test_missing_gauge_degrades() -> None:

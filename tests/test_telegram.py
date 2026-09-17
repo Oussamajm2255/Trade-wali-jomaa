@@ -282,6 +282,32 @@ def test_send_rejection_passes_note(monkeypatch):
     assert "rappel" in captured["text"]
 
 
+def test_send_records_latency(telegram_settings, monkeypatch):
+    import httpx
+
+    class FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(httpx, "post", lambda url, json=None, timeout=None: FakeResp())
+    notifier = TelegramNotifier(telegram_settings)
+    assert notifier.last_latency_ms == 0.0
+    assert notifier.send("hi")
+    assert notifier.last_latency_ms >= 0
+
+
+def test_send_failure_still_records_latency(telegram_settings, monkeypatch):
+    import httpx
+
+    def boom(url, json=None, timeout=None):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    notifier = TelegramNotifier(telegram_settings)
+    assert not notifier.send("hi")
+    assert notifier.last_latency_ms >= 0
+
+
 def test_send_signal_passes_record_and_proposal_id(telegram_settings, monkeypatch):
     captured: dict = {}
     notifier = TelegramNotifier(telegram_settings)

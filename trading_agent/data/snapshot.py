@@ -9,6 +9,7 @@ session, data quality) are computed locally, never by the LLM.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -72,6 +73,10 @@ class MarketSnapshot(BaseModel):
     shock_context: dict = Field(default_factory=dict)
     data_quality: DataQuality = Field(default_factory=DataQuality)
     versions: dict = Field(default_factory=dict)
+    # Phase A (V-MONSTER §5): latency/age metrics for one cycle — how
+    # long the data took to acquire and how fresh the newest candle is.
+    data_latency_ms: float = 0.0
+    data_age_s: float | None = None
 
     @property
     def quality_state(self) -> QualityState:
@@ -96,6 +101,10 @@ class MarketSnapshot(BaseModel):
         snap["data_quality"] = self.data_quality.state.value
         if self.data_quality.issues:
             snap["data_quality_issues"] = self.data_quality.issues
+        # Phase A metrics ride along: stored with every signal record
+        # (spec §85 lists system latency as required persistence).
+        snap["data_age_s"] = self.data_age_s
+        snap["data_latency_ms"] = round(self.data_latency_ms, 1)
         if htf_timeframe and htf_timeframe in self.biases:
             bias = self.biases[htf_timeframe]
             snap["htf_bias"] = {
@@ -192,7 +201,9 @@ def build_market_snapshot(
         versions=version_stamp(),
     )
     qualities: list[DataQuality] = []
+    entry_age: float | None = None
 
+    t_fetch = time.monotonic()
     for tf in timeframes:
         try:
             df = market.fetch_ohlcv(symbol, tf, settings.ohlcv_limit)
@@ -215,8 +226,11 @@ def build_market_snapshot(
             min_candles=settings.data_quality_min_candles,
             max_stale_multiple=settings.data_quality_max_stale_multiple,
             now=now,
+            clock_tolerance_s=settings.data_clock_tolerance_s,
         )
         qualities.append(q)
+        if tf == entry_tf:
+            entry_age = q.age_s
         if q.state == QualityState.FAIL:
             if tf == entry_tf:
                 raise MarketDataError(f"entry timeframe {tf} invalid: {q.issues}")
@@ -245,6 +259,8 @@ def build_market_snapshot(
 
     if entry_tf not in snap.indicators:
         raise MarketDataError("no valid entry timeframe snapshot")
+    snap.data_latency_ms = (time.monotonic() - t_fetch) * 1000
+    snap.data_age_s = entry_age
     snap.price = float(snap.indicators[entry_tf]["last_close"])
     snap.data_source = (
         getattr(market, "last_source", "") or getattr(market, "exchange_id", "unknown")

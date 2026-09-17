@@ -1239,7 +1239,16 @@ def cmd_loop(args: argparse.Namespace) -> None:
                 if seen.get(symbol) == last_ts:
                     continue  # no new closed candle yet
                 seen[symbol] = last_ts
+                t_cycle = time.monotonic()
                 result, verdicts, snapshot, gauge = orchestrator.run_full(symbol, timeframe)
+                processing_ms = (time.monotonic() - t_cycle) * 1000
+                # Phase A latency line (V-MONSTER §5): data acquisition,
+                # pipeline and Telegram round-trip per cycle.
+                console.print(
+                    f"[dim]latency: data {float(snapshot.get('data_latency_ms') or 0):.0f}ms · "
+                    f"processing {processing_ms:.0f}ms · telegram {notifier.last_latency_ms:.0f}ms · "
+                    f"data age {float(snapshot.get('data_age_s') or 0):.0f}s[/]"
+                )
 
                 # Degraded-mode alert: all agents fell back to heuristics
                 # (LLM unreachable, e.g. empty balance). Once per UTC day.
