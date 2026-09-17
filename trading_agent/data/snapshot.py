@@ -23,6 +23,7 @@ from trading_agent.data.calendar import build_calendar_provider
 from trading_agent.data.dxy_context import compute_dxy_context, xau_vs_dxy
 from trading_agent.data.gold_context import compute_gold_context
 from trading_agent.data.indicators import adx, atr, build_snapshot, ema, rsi
+from trading_agent.data.liquidity import compute_liquidity
 from trading_agent.data.market import MarketDataError
 from trading_agent.data.quality import (
     DataQuality,
@@ -40,6 +41,7 @@ from trading_agent.data.sessions import (
 )
 from trading_agent.data.shock import detect_shock
 from trading_agent.data.structure import detect_structure
+from trading_agent.data.vwap import compute_vwap
 from trading_agent.versioning import version_stamp
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,10 @@ class MarketSnapshot(BaseModel):
     # classification (spec §44).
     news_context: list[dict] = Field(default_factory=list)
     shock_context: dict = Field(default_factory=dict)
+    # Phase B (V-MONSTER §9/§12): deterministic liquidity map + VWAP
+    # anchors, both built from the snapshot's own candles.
+    liquidity: dict = Field(default_factory=dict)
+    vwap: dict = Field(default_factory=dict)
     data_quality: DataQuality = Field(default_factory=DataQuality)
     versions: dict = Field(default_factory=dict)
     # Phase A (V-MONSTER §5): latency/age metrics for one cycle — how
@@ -126,6 +132,8 @@ class MarketSnapshot(BaseModel):
         snap["dxy_context"] = self.dxy_context
         snap["news_context"] = self.news_context
         snap["shock_context"] = self.shock_context
+        snap["liquidity"] = self.liquidity
+        snap["vwap"] = self.vwap
         return snap
 
     def context_for_risk(self) -> dict:
@@ -143,6 +151,8 @@ class MarketSnapshot(BaseModel):
             "gold_context": self.gold_context,
             "news_context": self.news_context,
             "shock_context": self.shock_context,
+            "liquidity": self.liquidity,
+            "vwap": self.vwap,
             "versions": self.versions,
         }
 
@@ -269,6 +279,10 @@ def build_market_snapshot(
         qualities.append(
             DataQuality(state=QualityState.DEGRADED, issues=["provider fallback in use (proxy data)"])
         )
+    # Volume only counts on the primary feed: on proxy data (PAXG token)
+    # volume measures token flow, not gold flow — the shock engine and
+    # the VWAP (Phase B) both respect this flag.
+    trust_volume = "proxy" not in snap.data_source.lower()
 
     # Deterministic analysis layer (spec §5/§7): MTF alignment, entry-TF
     # structure. Enrichment — a failure degrades, never kills the cycle.
@@ -318,10 +332,6 @@ def build_market_snapshot(
     # feed degrades to "no events", never to fabricated ones.
     try:
         gauge_spread = snap.dxy.get("spread") if isinstance(snap.dxy, dict) else None
-        # Volume only counts on the primary feed: on proxy data (PAXG
-        # token) volume measures token flow, not gold flow, and a whale
-        # order can spike it 9x without any market shock.
-        trust_volume = "proxy" not in snap.data_source.lower()
         snap.shock_context = detect_shock(
             snap.candles[entry_tf],
             lookback=settings.shock_lookback,
@@ -358,17 +368,39 @@ def build_market_snapshot(
         asia=settings.session_asia,
         sydney=settings.session_sydney,
     )
+    session_start = session_start_utc(
+        now=now,
+        london=settings.session_london,
+        new_york=settings.session_new_york,
+        asia=settings.session_asia,
+        sydney=settings.session_sydney,
+    )
     snap.gold_context = compute_gold_context(
         snap.candles[entry_tf],
         daily_df=snap.candles.get("1d"),
-        session_start=session_start_utc(
-            now=now,
-            london=settings.session_london,
-            new_york=settings.session_new_york,
-            asia=settings.session_asia,
-            sydney=settings.session_sydney,
-        ),
+        session_start=session_start,
     )
+
+    # Phase B (V-MONSTER §9/§12): liquidity map + VWAP, built from the
+    # snapshot's own candles — deterministic enrichment, never fatal.
+    try:
+        snap.liquidity = compute_liquidity(
+            snap.candles[entry_tf],
+            snap.gold_context,
+            snap.structure,
+            now=now,
+            daily_df=snap.candles.get("1d"),
+        )
+    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+        logger.warning("liquidity map failed: %s", exc)
+    try:
+        snap.vwap = compute_vwap(
+            snap.candles[entry_tf],
+            session_start=session_start,
+            trust_volume=trust_volume,
+        )
+    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+        logger.warning("vwap failed: %s", exc)
 
     snap.data_quality = combine_quality(*qualities)
     logger.info(

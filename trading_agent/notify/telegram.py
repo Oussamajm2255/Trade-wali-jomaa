@@ -41,6 +41,12 @@ _SESSION_LABELS = {
     "LONDON_NY_OVERLAP": "Chevauchement Londres+NY",
     "OFF_SESSION": "hors session",
 }
+_VWAP_STATE_LABELS = {
+    "reclaimed": "réclamation du VWAP",
+    "rejected": "rejet du VWAP",
+    "above": "au-dessus du VWAP",
+    "below": "sous le VWAP",
+}
 
 
 def agent_bias(payload: dict) -> str | None:
@@ -195,6 +201,7 @@ class TelegramNotifier:
             lines.append("Contredit : " + " · ".join(contribution.contradicting))
         if contribution.invalidation:
             lines.append("Invalidation : " + contribution.invalidation)
+        lines.extend(self._liquidity_vwap_lines(snap))
 
         trail = []
         for gate in gates:
@@ -330,6 +337,7 @@ class TelegramNotifier:
             lines.append("Soutient : " + " · ".join(contribution.supporting))
         if contribution.contradicting:
             lines.append("Contredit : " + " · ".join(contribution.contradicting))
+        lines.extend(self._liquidity_vwap_lines(snap))
 
         trail = []
         for gate in gates:
@@ -357,6 +365,37 @@ class TelegramNotifier:
 
         lines += self._trace_lines(record)
         return "\n".join(lines)
+
+    def _liquidity_vwap_lines(self, snap: dict) -> list[str]:
+        """Phase B (V-MONSTER §9/§12): VWAP state + nearest liquidity."""
+        lines: list[str] = []
+        vwap = snap.get("vwap") or {}
+        if vwap.get("available"):
+            parts = []
+            if vwap.get("session_vwap") is not None:
+                parts.append(f"VWAP session : {float(vwap['session_vwap']):,.2f}")
+            if vwap.get("daily_vwap") is not None:
+                parts.append(f"VWAP jour : {float(vwap['daily_vwap']):,.2f}")
+            state = vwap.get("state")
+            if state:
+                parts.append(_VWAP_STATE_LABELS.get(state, state))
+            if parts:
+                lines.append(" · ".join(parts))
+        elif vwap.get("reason"):
+            lines.append(f"VWAP : indisponible ({vwap['reason']})")
+        liq = snap.get("liquidity") or {}
+        above = liq.get("nearest_above")
+        below = liq.get("nearest_below")
+        if above or below:
+            parts = []
+            if above:
+                parts.append(f"Liquidité ↑ {float(above['price']):,.2f} ({above.get('kind')})")
+            if below:
+                parts.append(f"Liquidité ↓ {float(below['price']):,.2f} ({below.get('kind')})")
+            if liq.get("quality") is not None:
+                parts.append(f"qualité {float(liq['quality']):.2f}")
+            lines.append(" | ".join(parts))
+        return lines
 
     def _trace_lines(self, record: dict) -> list[str]:
         """Data-quality + version footer shared by both rejection formats."""

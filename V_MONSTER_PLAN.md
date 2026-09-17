@@ -109,15 +109,24 @@ push gate. No V2 behaviour changes without a test proving parity.
 - Tests: age recording, replay anchoring, clock-skew flag, tolerance
   pass, snapshot metrics, telegram latency (success + failure).
 
-### Phase B — Liquidity map + VWAP (§9, §12)
+### Phase B — Liquidity map + VWAP (§9, §12) — ✅ DELIVERED
 - `data/liquidity.py` (new): previous day/week/month highs/lows, Asia/
   London/NY session ranges, equal highs/lows, swing clusters; distance
-  to nearest liquidity above/below; LIQUIDITY_QUALITY 0-1.
+  to nearest liquidity above/below; LIQUIDITY_QUALITY 0-1
+  (0.5×proximity + 0.3×density + 0.2×freshness); levels deduped,
+  PMH/PML via the 1d frame.
 - `data/vwap.py` (new): daily + session VWAP from OHLCV (typical price),
-  distance %, reclaim/rejection flag, VWAP trend.
-- Wire into `gold_context`/`snapshot`; add `liquidity` + `vwap` context
-  to signal records and both Telegram formats (VWAP line).
-- Tests: level extraction, distance maths, VWAP calc, reclaim detection.
+  distance %, reclaim/rejection flag, VWAP trend; marked UNAVAILABLE
+  with the reason when volume is untrusted (proxy) or absent.
+- Wired into `snapshot.py`: `MarketSnapshot.liquidity`/`vwap` fields,
+  included in `entry_snapshot_for_llm` (→ every signal record) and
+  `context_for_risk`; `trust_volume` hoisted and shared with the shock
+  engine.
+- `notify/telegram.py`: VWAP state + nearest liquidity lines added to
+  both proposal and rejection formats (`_liquidity_vwap_lines`).
+- Tests: level extraction, distance maths, quality scoring, PMH/PML,
+  session windows, VWAP calc, reclaim/rejection/trend, trust gating,
+  snapshot wiring, proxy unavailability.
 
 ### Phase C — Location quality + room-to-target (§28, §29)
 - `fusion/location.py` (new): LOCATION_QUALITY 0-1 from HTF structure,

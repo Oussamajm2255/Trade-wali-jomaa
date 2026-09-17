@@ -125,6 +125,36 @@ def test_snapshot_carries_phase_a_latency_metrics() -> None:
     assert entry["data_latency_ms"] == round(snap.data_latency_ms, 1)
 
 
+def test_snapshot_carries_phase_b_liquidity_and_vwap() -> None:
+    snap = build_market_snapshot(FakeMarket(gauge=fresh_gauge()), "XAUUSD", make_settings(), "15m")
+    assert snap.liquidity["price"] == snap.price
+    assert snap.liquidity["levels"]  # PDH/PDL always present via the 1d frame
+    assert 0.0 <= snap.liquidity["quality"] <= 1.0
+    assert snap.vwap["available"] is True  # yfinance source -> volume trusted
+    assert snap.vwap["daily_vwap"] is not None
+    assert snap.vwap["state"] in ("above", "below", "reclaimed", "rejected")
+    entry = snap.entry_snapshot_for_llm()
+    assert entry["liquidity"] is snap.liquidity
+    assert entry["vwap"] is snap.vwap
+    ctx = snap.context_for_risk()
+    assert ctx["liquidity"] is snap.liquidity
+    assert ctx["vwap"] is snap.vwap
+
+
+def test_proxy_source_marks_vwap_unavailable() -> None:
+    snap = build_market_snapshot(
+        FakeMarket(gauge=fresh_gauge(), source="PAXG/USDT proxy (futures closed)"),
+        "XAUUSD",
+        make_settings(),
+        "15m",
+    )
+    assert snap.vwap["available"] is False
+    assert "proxy" in snap.vwap["reason"]
+    assert snap.vwap["daily_vwap"] is None
+    # Liquidity levels stay honest on proxy data too.
+    assert snap.liquidity["price"] == snap.price
+
+
 def test_snapshot_with_intraday_dxy_candles() -> None:
     dxy = make_df(100, "15m")
     snap = build_market_snapshot(
