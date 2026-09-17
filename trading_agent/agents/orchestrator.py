@@ -31,7 +31,7 @@ from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.quality import QualityState
 from trading_agent.data.snapshot import MarketSnapshot, build_market_snapshot
 from trading_agent.fusion.engine import build_fusion_context, fuse_verdicts
-from trading_agent.fusion.types import FusionContext, FusionResult
+from trading_agent.fusion.types import FusionContext, FusionResult, NoTradeReason
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import (
     AgentVerdict,
@@ -395,7 +395,92 @@ class Orchestrator:
             trail=gates,
             now=now,
         )
+        # Final real-time revalidation (V-MONSTER §56): one fresh tick
+        # must still support the proposal after every gate passed. A
+        # failure turns the proposal into a recorded rejection — the
+        # send never happens (main only sends on SignalProposal).
+        if isinstance(result, SignalProposal):
+            invalid = self._revalidate_before_send(symbol, result, gates)
+            if invalid is not None:
+                result = invalid
         return result, verdicts, entry, snap.dxy, snap, fusion_context, gates, opp
+
+    def _revalidate_before_send(
+        self,
+        symbol: str,
+        proposal: SignalProposal,
+        gates: list[dict],
+    ) -> Rejection | None:
+        """Fresh-tick revalidation after all gates, before the send.
+
+        Checks price drift from the proposal entry, spread and data age
+        against the Phase F settings. Fails open: no tick source, no
+        data or a fetch error never blocks (honesty, spec §4).
+        """
+        if not self.settings.final_revalidation_enabled:
+            return None
+        market = getattr(self, "market", None)
+        tick_fn = getattr(market, "tick", None)
+        if tick_fn is None:
+            gates.append(
+                {"gate": "revalidation", "status": "pass", "detail": "no tick source"}
+            )
+            return None
+        try:
+            fresh = tick_fn(symbol)
+        except Exception as exc:  # noqa: BLE001 - revalidation must never kill the cycle
+            logger.warning("final revalidation tick failed for %s: %s", symbol, exc)
+            fresh = None
+        if not fresh or fresh.get("price") is None:
+            gates.append(
+                {"gate": "revalidation", "status": "pass", "detail": "tick unavailable"}
+            )
+            return None
+
+        def reject(detail: str, reason: NoTradeReason) -> Rejection:
+            gates.append({"gate": "revalidation", "status": "reject", "detail": detail})
+            try:
+                actions.audit(
+                    "WARNING",
+                    "signal_invalidated_pre_send",
+                    {"symbol": symbol, "detail": detail},
+                )
+            except Exception:  # noqa: BLE001 - audit must never kill the cycle
+                pass
+            return Rejection(
+                symbol=symbol,
+                reason=f"signal invalidated pre-send: {detail}",
+                no_trade_reason=reason.value,
+            )
+
+        price = float(fresh["price"])
+        drift_pct = (
+            abs(price - proposal.entry) / proposal.entry * 100.0 if proposal.entry > 0 else 0.0
+        )
+        if drift_pct > self.settings.revalidate_max_drift_pct:
+            return reject(
+                f"price drifted {drift_pct:.4f}% from entry {proposal.entry} to {price}",
+                NoTradeReason.SIGNAL_INVALIDATED,
+            )
+        spread = fresh.get("spread")
+        if spread is not None and self.settings.no_trade_max_spread_pct > 0 and price > 0:
+            spread_pct = float(spread) / price * 100.0
+            if spread_pct > self.settings.no_trade_max_spread_pct:
+                return reject(
+                    f"spread {spread_pct:.4f}% above maximum "
+                    f"{self.settings.no_trade_max_spread_pct}%",
+                    NoTradeReason.BAD_SPREAD,
+                )
+        age = fresh.get("age_s")
+        if age is not None and age > self.settings.revalidate_max_age_s:
+            return reject(
+                f"tick data age {age:.0f}s above maximum {self.settings.revalidate_max_age_s}s",
+                NoTradeReason.SIGNAL_INVALIDATED,
+            )
+        gates.append(
+            {"gate": "revalidation", "status": "pass", "detail": f"drift {drift_pct:.4f}%"}
+        )
+        return None
 
     def _record_signal(
         self,
@@ -452,6 +537,10 @@ class Orchestrator:
                 "calibrated_confidence": fusion_context.calibrated_confidence,
                 "regime": fusion_context.regime,
                 "spread_pct": fusion_context.spread_pct,
+                # Phase D trigger + Phase F stability ride along so the
+                # Telegram lines and the dashboard can render them.
+                "trigger": fusion_context.trigger,
+                "stability": fusion_context.stability,
             }
             record["setup_quality"] = fusion_context.setup_quality.model_dump()
             record["conflicts"] = fusion_context.conflict.model_dump()

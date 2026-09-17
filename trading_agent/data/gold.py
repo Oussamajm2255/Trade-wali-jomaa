@@ -265,6 +265,38 @@ class GoldData:
             "kind": "dxy",
         }
 
+    def tick(self, symbol: str = "XAUUSD") -> dict | None:
+        """Fresh tick for the final pre-send revalidation (V-MONSTER §56).
+
+        Live mode: the broker terminal's XAUUSD tick. Paper/proxy mode:
+        a PAXG ticker when the last analysis came from the proxy, else
+        None (yfinance has no reliable free tick). None never blocks —
+        the revalidation gate fails open (no data, no block, spec §4).
+        """
+        if self.mt5 is not None:
+            try:
+                t = self.mt5.tick(symbol)
+                if t:
+                    return t
+            except Exception as exc:  # noqa: BLE001 - any MT5 failure degrades
+                logger.warning("MT5 tick failed, trying proxy: %s", exc)
+        if "PAXG" not in self.last_source:
+            return None
+        try:
+            raw = self._paxg_client().fetch_ticker(PAXG_SYMBOL)
+        except Exception as exc:  # noqa: BLE001 - exchange may be gone
+            logger.warning("PAXG tick failed: %s", exc)
+            return None
+        if not raw or raw.get("last") is None:
+            return None
+        spread = None
+        if raw.get("bid") and raw.get("ask"):
+            spread = round(float(raw["ask"]) - float(raw["bid"]), 8)
+        age_s = None
+        if raw.get("timestamp"):
+            age_s = max(0.0, time.time() - float(raw["timestamp"]) / 1000.0)
+        return {"price": float(raw["last"]), "spread": spread, "age_s": age_s}
+
     def analysis_input(self, symbol: str, timeframe: str, limit: int) -> tuple[pd.DataFrame, dict, dict | None]:
         df = self.fetch_ohlcv(symbol, timeframe, limit)
         snapshot = build_snapshot(df)

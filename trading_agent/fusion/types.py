@@ -42,6 +42,9 @@ class NoTradeReason(StrEnum):
     # Phase E (V-MONSTER §52/§53): opportunity clustering dedup.
     OPPORTUNITY_ACTIVE = "OPPORTUNITY_ACTIVE"
     SIGNAL_DUPLICATE = "SIGNAL_DUPLICATE"
+    # Phase F (V-MONSTER §56): final real-time revalidation aborted the
+    # send — price drifted, spread blew out or the data went stale.
+    SIGNAL_INVALIDATED = "SIGNAL_INVALIDATED"
     NEWS_RISK = "NEWS_RISK"
     SHOCK = "SHOCK"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
@@ -116,3 +119,7 @@ class FusionContext(BaseModel):
     # computed per side in build_fusion_context and stored with every
     # signal record.
     trigger: dict = Field(default_factory=dict)
+    # Phase F (V-MONSTER §32): signal stability classification
+    # (STABLE/FRAGILE/VERY_FRAGILE) from ±1 tick / −1 candle
+    # sensitivity — enrichment stored with every signal record.
+    stability: dict = Field(default_factory=dict)

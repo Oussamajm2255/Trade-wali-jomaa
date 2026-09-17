@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -161,6 +162,40 @@ class MT5Broker:
             ["time", "open", "high", "low", "close", "volume"]
         ]
         return df.set_index("time")
+
+    def tick(self, symbol: str) -> dict | None:
+        """Fresh tick for the final pre-send revalidation (V-MONSTER §56).
+
+        None when the terminal is not connected, the symbol is unknown
+        or the fetch fails — the revalidation gate fails open (no data,
+        no block, spec §4).
+        """
+        if not self._connected:
+            return None
+        mt5 = self._import_mt5()
+        try:
+            resolved = self._resolve_symbol(symbol)
+            info = mt5.symbol_info_tick(resolved)
+        except Exception as exc:  # noqa: BLE001 - any MT5 failure degrades
+            logger.warning("tick fetch failed for %s: %s", symbol, exc)
+            return None
+        if info is None or info.bid is None or info.ask is None:
+            return None
+        age_s = None
+        if getattr(info, "time", None):
+            age_s = max(
+                0.0,
+                (
+                    datetime.now(timezone.utc)
+                    - datetime.fromtimestamp(info.time, tz=timezone.utc)
+                ).total_seconds(),
+            )
+        bid, ask = float(info.bid), float(info.ask)
+        return {
+            "price": round((bid + ask) / 2.0, 8),
+            "spread": round(ask - bid, 8),
+            "age_s": age_s,
+        }
 
     def open_position(self, proposal: SignalProposal) -> Position | None:
         """Open a live position with server-side SL/TP. Idempotent by proposal."""

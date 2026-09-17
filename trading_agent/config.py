@@ -222,6 +222,28 @@ class Settings(BaseSettings):
     opportunity_price_tolerance_pct: float = 0.1  # "close price" band
     opportunity_ttl_minutes: int = 720  # FORMING -> EXPIRED lifetime
 
+    # --- Signal stability (V-MONSTER §32, Phase F) ---
+    # STABLE/FRAGILE/VERY_FRAGILE from ±1 tick / −1 candle
+    # perturbations. Sensitivity is measured in score deltas (tick) and
+    # in ATRs (entry/stop); a speed-state flip on the shortened frame
+    # marks a regime boundary. Enrichment, never a hard gate by itself.
+    stability_tick: float = 0.01
+    stability_score_fragile: float = 0.05  # setup-score delta -> FRAGILE
+    stability_score_very_fragile: float = 0.15
+    stability_entry_fragile_atr_mult: float = 0.2  # close move -> FRAGILE
+    stability_entry_very_fragile_atr_mult: float = 0.4
+    stability_stop_fragile_atr_mult: float = 0.1  # stop move -> FRAGILE
+    stability_stop_very_fragile_atr_mult: float = 0.25
+
+    # --- Final real-time revalidation (V-MONSTER §56, Phase F) ---
+    # After all gates and before the send, one fresh tick must still
+    # support the proposal: price drift, spread and data age are
+    # re-checked. A failure aborts the send (recorded, no Telegram);
+    # no tick source, no data or a fetch error never blocks.
+    final_revalidation_enabled: bool = True
+    revalidate_max_drift_pct: float = 0.15  # |tick - entry| / entry * 100
+    revalidate_max_age_s: float = 600  # tick older than this = stale
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.

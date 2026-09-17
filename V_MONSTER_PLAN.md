@@ -212,13 +212,36 @@ push gate. No V2 behaviour changes without a test proving parity.
   semantics (10), lifecycle transitions (2), orchestrator gate + record
   stamping + disabled-config honesty (3).
 
-### Phase F — Signal stability + final real-time revalidation (§32, §56)
-- `fusion/stability.py` (new): STABLE/FRAGILE/VERY_FRAGILE via score,
-  entry, stop sensitivity to ±1 tick/±1 candle perturbations.
-- Orchestrator: final refresh (price/spread/age) after all gates and
-  before send; revalidate entry/stop/target; abort send if invalid
-  (state change recorded, no Telegram).
-- Tests: sensitivity classification, revalidation abort path.
+### Phase F — Signal stability + final real-time revalidation (§32, §56) — ✅ DELIVERED
+- `fusion/stability.py` (new): STABLE/FRAGILE/VERY_FRAGILE from two
+  deterministic perturbations — ±1 tick on price recomputes the setup-
+  quality score (score sensitivity = max delta), −1 candle recomputes
+  ATR + speed on the shortened frame (entry sensitivity = second-to-
+  last close vs price in ATRs; stop sensitivity = stop-distance move in
+  ATRs; a speed-state flip marks a regime boundary). Worst axis wins;
+  NEUTRAL is not classified; insufficient history is FRAGILE (unknown
+  is not stable) — enrichment stored with every signal record, never a
+  hard gate by itself.
+- `FusionContext.stability` computed in `build_fusion_context`; the
+  orchestrator now persists `trigger` + `stability` in the signal
+  record's fusion dict (fixes the Phase D trigger line never
+  rendering — Telegram reads it from the record).
+- Final real-time revalidation (§56): after all gates and before the
+  send, one fresh tick must still support the proposal — price drift
+  vs entry (`revalidate_max_drift_pct`), fresh spread vs the existing
+  BAD_SPREAD ceiling and tick age (`revalidate_max_age_s`). A failure
+  returns a recorded Rejection (new NoTradeReason SIGNAL_INVALIDATED;
+  spread failures reuse BAD_SPREAD) with a `revalidation` gate-trail
+  entry and a `signal_invalidated_pre_send` audit event — the send
+  never happens (main only sends on SignalProposal).
+- Tick sources: `MT5Broker.tick` (broker ask/bid/tick-time), ccxt
+  `MarketData.tick`, `GoldData.tick` (MT5 delegate live, PAXG ticker on
+  proxy). No tick source, no data or a fetch error fails open — no
+  data never blocks (spec §4).
+- Tests: stability classification (neutral/insufficient/stable/fragile/
+  very-fragile/speed-flip/engine wiring, 8), revalidation gate
+  (pass/drift/spread/stale/disabled/no-source/fetch-failure, 7), tick
+  sources (5).
 
 ### Phase G — Timing, actionability, execution model (§42-§49, §64)
 - `fusion/timing.py` (new): TIMING_QUALITY 0-1 (trigger maturity,
@@ -293,7 +316,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 486 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 506 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -320,8 +343,9 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase E — opportunity
-  clustering + signal dedup are live. Its confidence scores have no
+- **Current frontier**: the live bot is at Phase F — signal stability
+  classification + final real-time revalidation are live. Its
+  confidence scores have no
   calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP

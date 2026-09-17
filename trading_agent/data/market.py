@@ -5,6 +5,7 @@ exchange keys are ever required or accepted.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
@@ -14,6 +15,9 @@ import pandas as pd
 import requests
 
 from trading_agent.data.indicators import build_snapshot
+
+
+logger = logging.getLogger(__name__)
 
 
 class MarketDataError(RuntimeError):
@@ -82,6 +86,27 @@ class MarketData:
             }
         except Exception as exc:  # noqa: BLE001
             raise MarketDataError(f"fear_greed_index failed: {exc}") from exc
+
+    def tick(self, symbol: str) -> dict | None:
+        """Fresh ticker for the final pre-send revalidation (V-MONSTER §56).
+
+        None on any fetch failure — the revalidation gate fails open
+        (no data, no block, spec §4).
+        """
+        try:
+            t = self._client().fetch_ticker(symbol)
+        except Exception as exc:  # noqa: BLE001 - ccxt raises many types
+            logger.warning("tick fetch failed for %s: %s", symbol, exc)
+            return None
+        if not t or t.get("last") is None:
+            return None
+        spread = None
+        if t.get("bid") and t.get("ask"):
+            spread = round(float(t["ask"]) - float(t["bid"]), 8)
+        age_s = None
+        if t.get("timestamp"):
+            age_s = max(0.0, time.time() - float(t["timestamp"]) / 1000.0)
+        return {"price": float(t["last"]), "spread": spread, "age_s": age_s}
 
     def analysis_input(self, symbol: str, timeframe: str, limit: int) -> tuple[pd.DataFrame, dict, dict | None]:
         """One call that gathers candles + indicator snapshot + sentiment.

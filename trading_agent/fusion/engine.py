@@ -11,6 +11,7 @@ from trading_agent.config import Settings
 from trading_agent.fusion.confidence import calibrated_confidence
 from trading_agent.fusion.conflicts import detect_conflicts
 from trading_agent.fusion.setup_quality import compute_setup_quality
+from trading_agent.fusion.stability import compute_stability
 from trading_agent.fusion.trigger import compute_trigger_quality
 from trading_agent.fusion.types import ConflictState, FusionContext, FusionResult
 from trading_agent.schema.types import AgentVerdict, Bias, Regime, Side
@@ -122,4 +123,5 @@ def build_fusion_context(
         regime=regime_label,
         spread_pct=spread_pct,
         trigger=compute_trigger_quality(fusion.side, snapshot, settings),
+        stability=compute_stability(fusion.side, snapshot, settings),
     )
