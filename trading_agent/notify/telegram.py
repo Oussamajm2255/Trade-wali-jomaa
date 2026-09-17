@@ -42,6 +42,27 @@ _SESSION_LABELS = {
 }
 
 
+def agent_bias(payload: dict) -> str | None:
+    """Each agent names its direction differently: technical uses
+    'bias', dxy uses 'gold_bias', regime uses 'trend_direction'/'regime'."""
+    for key in ("bias", "side", "gold_bias", "trend_direction", "regime"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def agent_conviction(payload: dict) -> float | None:
+    """Confidence under each agent's own key name ('conviction' or
+    'confidence'); 'score' is excluded — it is a signed direction score
+    (dxy), not a 0-1 conviction."""
+    for key in ("conviction", "confidence"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
@@ -177,10 +198,9 @@ class TelegramNotifier:
         for name, verdict in sorted(outputs.items()):
             verdict = verdict or {}
             payload = verdict.get("payload") or {}
-            bias = payload.get("bias") or payload.get("side") or "?"
-            piece = f"{name.upper()} : {bias}"
-            conviction = payload.get("conviction")
-            if isinstance(conviction, (int, float)):
+            piece = f"{name.upper()} : {agent_bias(payload) or '?'}"
+            conviction = agent_conviction(payload)
+            if conviction is not None:
                 piece += f" ({conviction:.2f})"
             if verdict.get("source") == "fallback":
                 piece += " [heuristique]"
@@ -221,7 +241,16 @@ class TelegramNotifier:
         return text
 
     def rejection_message(self, record: dict, note: str | None = None) -> str:
-        """Concise rejected-opportunity alert (§38), traced to the record."""
+        """Rejected-opportunity alert (§38) with the WHY, traced to the record.
+
+        When the agents ran before the refusal (record has `ai_outputs`)
+        the message carries the full analysis: fusion confidence, MTF
+        biases, regime/DXY/session context, structure, §47 contributions,
+        the gate trail and each agent's verdict + reasoning — the smart
+        justification for not putting money in. Pre-AI refusals (data
+        down, news blackout, shock) fall back to the concise format;
+        nothing is ever invented.
+        """
         reason = record.get("decision_reason") or "aucune raison enregistrée"
         code = record.get("no_trade_reason")
         tf = record.get("timeframe")
@@ -231,6 +260,100 @@ class TelegramNotifier:
         ]
         if note:
             lines.append(note)
+        outputs = record.get("ai_outputs") or {}
+        if not outputs:
+            lines += self._trace_lines(record)
+            return "\n".join(lines)
+
+        snap = record.get("market_snapshot") or {}
+        fusion = record.get("fusion") or {}
+        gates = record.get("gates") or []
+        contribution = feature_contribution(record)
+
+        lines.append("")
+        raw = fusion.get("raw_confidence")
+        if raw is not None:
+            conf = f"Confiance brute : {float(raw):.2f}"
+            calibrated = fusion.get("calibrated_confidence")
+            if calibrated is not None:
+                conf += f" | Calibrée : {float(calibrated):.2f}"
+            lines.append(conf)
+
+        mtf = snap.get("mtf_biases") or {}
+        ordered = [t for t in _MTF_ORDER if t in mtf] + sorted(set(mtf) - set(_MTF_ORDER))
+        if ordered:
+            parts = [
+                f"{_TF_LABELS.get(t, t)} "
+                f"{_BIAS_LABELS.get(str(mtf[t].get('bias')).lower(), mtf[t].get('bias'))}"
+                for t in ordered
+            ]
+            lines.append("Biais MTF : " + " · ".join(parts))
+        regime = (snap.get("regime") or {}).get("regime")
+        dxy_ctx = snap.get("dxy_context") or {}
+        dxy_gauge = snap.get("dxy_gauge") or {}
+        dxy_class = dxy_ctx.get("classification") or dxy_gauge.get("classification")
+        dxy_trend = dxy_ctx.get("trend")
+        session = (snap.get("session_context") or {}).get("session")
+        ctx = []
+        if regime:
+            ctx.append(f"Régime : {_REGIME_LABELS.get(regime, regime)}")
+        if dxy_class:
+            ctx.append(f"DXY : {dxy_class}")
+        if dxy_trend:
+            ctx.append(f"Tendance DXY : {_DXY_TREND_LABELS.get(str(dxy_trend).lower(), dxy_trend)}")
+        if session:
+            ctx.append(f"Session : {_SESSION_LABELS.get(session, session)}")
+        if ctx:
+            lines.append(" | ".join(ctx))
+
+        structure = snap.get("structure") or {}
+        present = [
+            label
+            for key, label in (
+                ("bos", "BOS"),
+                ("choch", "CHoCH"),
+                ("fvgs", "FVG"),
+                ("sweeps", "balayage de liquidité"),
+            )
+            if structure.get(key)
+        ]
+        if present:
+            lines.append("Structure : " + ", ".join(present))
+        if contribution.supporting:
+            lines.append("Soutient : " + " · ".join(contribution.supporting))
+        if contribution.contradicting:
+            lines.append("Contredit : " + " · ".join(contribution.contradicting))
+
+        trail = []
+        for gate in gates:
+            mark = "✓" if gate.get("status") == "pass" else "✗"
+            trail.append(f"{gate.get('gate')} {mark}")
+        if trail:
+            lines.append("Gates : " + " | ".join(trail))
+
+        for name, verdict in sorted(outputs.items()):
+            verdict = verdict or {}
+            payload = verdict.get("payload") or {}
+            piece = f"{name.upper()} : {agent_bias(payload) or '?'}"
+            conviction = agent_conviction(payload)
+            if conviction is not None:
+                piece += f" ({conviction:.2f})"
+            if verdict.get("source") == "fallback":
+                piece += " [heuristique]"
+            lines.append(piece)
+            reasoning = str(payload.get("reasoning") or "").strip()
+            if reasoning:
+                snippet = reasoning[:180]
+                if len(reasoning) > 180:
+                    snippet += "…"
+                lines.append(f"  ↳ {snippet}")
+
+        lines += self._trace_lines(record)
+        return "\n".join(lines)
+
+    def _trace_lines(self, record: dict) -> list[str]:
+        """Data-quality + version footer shared by both rejection formats."""
+        lines: list[str] = []
         snap = record.get("market_snapshot") or {}
         quality = snap.get("data_quality")
         if quality:
@@ -238,7 +361,7 @@ class TelegramNotifier:
         version = record.get("strategy_version")
         if version:
             lines.append(f"Version : {version}")
-        return "\n".join(lines)
+        return lines
 
     def send_signal(
         self,

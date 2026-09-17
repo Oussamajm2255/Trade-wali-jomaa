@@ -49,7 +49,7 @@ from trading_agent.data.sessions import session_state
 from trading_agent.execution.mt5 import MT5Broker, MT5Error
 from trading_agent.execution.paper import PaperBroker
 from trading_agent.notify.dedup import RejectionDedup
-from trading_agent.notify.telegram import TelegramNotifier
+from trading_agent.notify.telegram import TelegramNotifier, agent_bias, agent_conviction
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import Rejection, SignalProposal
 from trading_agent.store import actions
@@ -1256,6 +1256,19 @@ def cmd_loop(args: argparse.Namespace) -> None:
 
                 if isinstance(result, Rejection):
                     console.print(f"[dim]{symbol}: no trade — {result.reason}[/]")
+                    # Compact agent summary so the console log alone
+                    # explains the refusal; Telegram carries the full
+                    # analysis (biases, reasoning, contributions, gates).
+                    agent_pieces = []
+                    for name, v in sorted(verdicts.items()):
+                        payload = (v.payload or {}) if v else {}
+                        piece = f"{name} {agent_bias(payload) or '?'}"
+                        conv = agent_conviction(payload)
+                        if conv is not None:
+                            piece += f" {conv:.2f}"
+                        agent_pieces.append(piece)
+                    if agent_pieces:
+                        console.print(f"[dim]  agents: {' · '.join(agent_pieces)}[/]")
                     # Every rejected opportunity stores its data-quality state
                     # and strategy version (spec §4/§22 — audit the NO-trades).
                     actions.audit(

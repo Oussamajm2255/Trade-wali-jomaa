@@ -165,14 +165,65 @@ def test_legacy_fallback_without_record(telegram_settings):
     assert "Risque : 50.00 $ | Confiance : 0.72" in text
 
 
-def test_rejection_message_is_concise_and_traced(telegram_settings):
+def test_rejection_message_includes_reason_trace_and_analysis(telegram_settings):
     text = TelegramNotifier(telegram_settings).rejection_message(
         _record(decision_reason="dollar trop fort pour un LONG", no_trade_reason="DXY_FILTER")
     )
-    assert "🚫 SIGNAL REJETÉ XAUUSD" in text
+    assert "🚫 SIGNAL REJETÉ XAUUSD (15m)" in text
     assert "Raison : dollar trop fort pour un LONG (DXY_FILTER)" in text
     assert "Qualité des données : good" in text
     assert "Version : LEGACY_BASELINE" in text
+    # The agents ran before the refusal: the WHY must be in the message.
+    assert "Confiance brute : 0.70" in text
+    assert "Gates : ai_signal ✓ | setup_quality ✓ | risk ✓" in text
+    assert "TECHNICAL : long (0.80)" in text
+    assert "REGIME : long (0.60) [heuristique]" in text
+    assert "↳ r" in text  # agent reasoning snippet
+    assert "Contredit : " in text and "volatilité faible (0.30)" in text
+
+
+def test_rejection_message_labels_dxy_and_regime_payloads(telegram_settings):
+    record = _record(decision_reason="x", no_trade_reason="LOW_CONFIDENCE")
+    record["ai_outputs"] = {
+        "dxy": {
+            "agent": "dxy",
+            "source": "llm",
+            "payload": {"gold_bias": "short", "score": -0.4, "confidence": 0.7,
+                        "reasoning": "dollar fort"},
+        },
+        "regime": {
+            "agent": "regime",
+            "source": "llm",
+            "payload": {"regime": "ranging", "trend_direction": "flat",
+                        "confidence": 0.55, "reasoning": "range"},
+        },
+    }
+    text = TelegramNotifier(telegram_settings).rejection_message(record)
+    assert "DXY : short (0.70)" in text
+    assert "REGIME : flat (0.55)" in text
+    assert "↳ dollar fort" in text
+
+
+def test_rejection_message_concise_when_agents_did_not_run(telegram_settings):
+    # Pre-AI refusals (news blackout, shock, data down) have no ai_outputs
+    # and must stay concise — never invent an analysis that did not happen.
+    record = {
+        "signal_id": "sig-1",
+        "symbol": "XAUUSD",
+        "timeframe": "15m",
+        "strategy_version": "LEGACY_BASELINE",
+        "market_snapshot": {"data_quality": "good"},
+        "decision_reason": "high-impact news within blackout window",
+        "no_trade_reason": "NEWS_RISK",
+    }
+    text = TelegramNotifier(telegram_settings).rejection_message(record)
+    assert "Raison : high-impact news within blackout window (NEWS_RISK)" in text
+    assert "Qualité des données : good" in text
+    assert "Version : LEGACY_BASELINE" in text
+    assert "Confiance brute" not in text
+    assert "Biais MTF" not in text
+    assert "Gates :" not in text
+    assert "TECHNICAL" not in text
 
 
 def test_rejection_message_without_reason_has_fallback(telegram_settings):
