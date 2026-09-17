@@ -238,5 +238,36 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 394 tests + A/B `ab-compare` gate on any scoring change
-  (V2 verdict must stay IMPROVED, or the change is reverted).
+- Regression: 421 tests + A/B `ab-compare` gate on any scoring change
+  (see §7 for what IMPROVED means and when it can fire).
+
+## 7. Evaluation honesty protocol (added after external review)
+
+Tests prove code correctness, not trading edge. Edge is a separate
+claim, gated on sample size and a truly untouched validation set:
+
+- **Held-out final validation set**: a fixed date window of XAUUSD
+  history that is NEVER used for development, tuning, walk-forward or
+  A/B. It is touched exactly once, at the end of Phase L, to answer a
+  single question: does the calibration curve hold out-of-sample?
+  Default: the 12 months ending at the Phase C model freeze; all
+  development/walk-forward/A-B windows must end before it. Locked
+  now, so no later phase can peek.
+- **What IMPROVED means**: the A/B verdict (`analytics/compare.py`,
+  §40/§41) requires ≥ `min_trades` resolved trades per side, better
+  expectancy AND drawdown/profit factor not meaningfully worse;
+  fewer trades alone is never an improvement (§41). Today the paper
+  DB has 0 resolved trades, so the gate reports INSUFFICIENT_DATA by
+  design — never IMPROVED. Until trades exist, the operative
+  regression check per phase is: full suite green + walk-forward
+  parity + no WORSE verdict.
+- **Sample size (§36)**: no fixed "100 trades" rule — the required N
+  for any performance claim is derived from effect size, variance and
+  power (Phase L). Until then, every confidence/win-rate number shown
+  to the trader is labeled UNVALIDATED, not presented as probability.
+- **Current frontier**: the live bot is at Phase B — infrastructure.
+  Its confidence scores have no calibration guarantee yet; Phases K/L
+  are the first point at which scores claim meaning.
+- **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
+  is marked unavailable in Telegram with the reason — it is never
+  presented as institutional gold VWAP.
