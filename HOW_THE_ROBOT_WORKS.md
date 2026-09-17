@@ -303,6 +303,7 @@ signal record; it doesn't block.
 | Kill-switch trip | Alert on Telegram, no new proposals |
 | Position closes | Outcome + MFE/MAE stored; confidence calibration updates |
 | Every day (UTC) | DeepSeek balance check → alert if < 1 USD |
+| Every rejected signal | Telegram alert with the gate + reason (deduped repeats → hourly heartbeat) |
 
 ---
 
@@ -328,9 +329,10 @@ signal record; it doesn't block.
 
 ## 15. How to Improve Decision Accuracy (your levers)
 
-1. **Read the rejections.** Every refusal tells you which gate fired.
-   Use `signal <id>` to see the full gate trail of any decision, or
-   `history` for the recent audit events.
+1. **Read the rejections.** Every refusal now reaches you on Telegram
+   with the gate that fired and why (consecutive repeats are deduplicated
+   into a heartbeat). Use `signal <id>` to see the full gate trail of any
+   decision, or `history` for the recent audit events.
 2. **Trust the statistics, not feelings.** The dashboard shows win rate
    and expectancy **per confidence bucket**. If 0.70+ signals win much
    more than 0.55–0.70 ones, raise `min_confidence` to 0.70 and trade

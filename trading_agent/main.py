@@ -48,6 +48,7 @@ from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.sessions import session_state
 from trading_agent.execution.mt5 import MT5Broker, MT5Error
 from trading_agent.execution.paper import PaperBroker
+from trading_agent.notify.dedup import RejectionDedup
 from trading_agent.notify.telegram import TelegramNotifier
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import Rejection, SignalProposal
@@ -1116,6 +1117,12 @@ def cmd_loop(args: argparse.Namespace) -> None:
     markets: dict[str, object] = {}
     orchestrators: dict[str, Orchestrator] = {}
     seen: dict[str, object] = {}
+    # Rejection phone alerts are deduplicated per symbol: the first
+    # refusal of a gate code sends immediately, repeats only re-send as
+    # an availability heartbeat (telegram_rejection_repeat_minutes).
+    reject_dedup = {
+        s: RejectionDedup(settings.telegram_rejection_repeat_minutes) for s in symbols
+    }
     halt_banner_shown = False
     kill_executed = False
     halt_notified = False
@@ -1261,12 +1268,18 @@ def cmd_loop(args: argparse.Namespace) -> None:
                             "strategy_version": version_stamp()["strategy_version"],
                         },
                     )
-                    # Optional phone alert for refused opportunities (§38):
-                    # concise, off by default, always traced to the record.
+                    # Phone alert for refused opportunities (§38): the
+                    # refusal and its reason are trader intelligence.
+                    # Consecutive refusals by the SAME gate are not
+                    # spammed — dedup sends the first, then a heartbeat
+                    # once per telegram_rejection_repeat_minutes.
                     if notifier.enabled and result.signal_id:
                         row = actions.get_signal(result.signal_id)
                         if row is not None:
-                            notifier.send_rejection(row.to_dict())
+                            code = result.no_trade_reason or result.reason
+                            send, note = reject_dedup[symbol].should_send(code)
+                            if send:
+                                notifier.send_rejection(row.to_dict(), note=note)
                     continue
                 proposal_id = actions.save_proposal(result)
                 actions.link_signal_proposal(result.signal_id, proposal_id)

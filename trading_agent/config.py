@@ -64,9 +64,13 @@ class Settings(BaseSettings):
     # --- Notifications (Telegram) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    # Optional push for REJECTED opportunities (§38): concise, off by
-    # default to keep the phone quiet — rejections always stay in the DB.
-    telegram_rejection_alerts: bool = False
+    # Push for REJECTED opportunities (§38): a refusal + its reason is
+    # trader intelligence (why not to put money, and proof the robot is
+    # still analysing). Consecutive refusals by the SAME gate are
+    # deduplicated — one availability heartbeat per repeat window instead
+    # of ~96 identical messages per day. Rejections always stay in the DB.
+    telegram_rejection_alerts: bool = True
+    telegram_rejection_repeat_minutes: int = 60
 
     # --- Trading sessions (analysis gate) ---
     # Analysis runs only while London or New York is open. Times are LOCAL

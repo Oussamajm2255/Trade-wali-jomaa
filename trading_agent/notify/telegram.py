@@ -220,14 +220,17 @@ class TelegramNotifier:
         )
         return text
 
-    def rejection_message(self, record: dict) -> str:
+    def rejection_message(self, record: dict, note: str | None = None) -> str:
         """Concise rejected-opportunity alert (§38), traced to the record."""
         reason = record.get("decision_reason") or "aucune raison enregistrée"
         code = record.get("no_trade_reason")
+        tf = record.get("timeframe")
         lines = [
-            f"🚫 SIGNAL REJETÉ {record.get('symbol', '?')}",
+            f"🚫 SIGNAL REJETÉ {record.get('symbol', '?')}" + (f" ({tf})" if tf else ""),
             f"Raison : {reason}" + (f" ({code})" if code else ""),
         ]
+        if note:
+            lines.append(note)
         snap = record.get("market_snapshot") or {}
         quality = snap.get("data_quality")
         if quality:
@@ -246,11 +249,11 @@ class TelegramNotifier:
     ) -> bool:
         return self.send(self.proposal_message(proposal, gauge, record, proposal_id))
 
-    def send_rejection(self, record: dict) -> bool:
+    def send_rejection(self, record: dict, note: str | None = None) -> bool:
         """Rejected-opportunity alert, gated by telegram_rejection_alerts."""
         if not self.s.telegram_rejection_alerts:
             return False
-        return self.send(self.rejection_message(record))
+        return self.send(self.rejection_message(record, note))
 
     def send_alert(self, text: str) -> bool:
         return self.send(f"🚨 {text}")

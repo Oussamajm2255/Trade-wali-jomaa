@@ -184,9 +184,14 @@ def test_rejection_message_without_reason_has_fallback(telegram_settings):
     assert "Raison : aucune raison enregistrée" in text
 
 
-def test_send_rejection_gated_off_by_default(telegram_settings, monkeypatch):
+def test_send_rejection_gated_off_when_disabled(monkeypatch):
+    settings = Settings(
+        telegram_bot_token="123:abc",
+        telegram_chat_id="987",
+        telegram_rejection_alerts=False,
+    )
     sent: list[str] = []
-    notifier = TelegramNotifier(telegram_settings)
+    notifier = TelegramNotifier(settings)
     monkeypatch.setattr(notifier, "send", lambda text: sent.append(text) or True)
     assert not notifier.send_rejection(_record(decision_reason="x"))
     assert sent == []
@@ -202,6 +207,28 @@ def test_send_rejection_sends_when_enabled(monkeypatch):
     assert notifier.send_rejection(_record(decision_reason="x"))
     assert len(sent) == 1
     assert "SIGNAL REJETÉ" in sent[0]
+
+
+def test_rejection_message_includes_timeframe_and_dedup_note(telegram_settings):
+    text = TelegramNotifier(telegram_settings).rejection_message(
+        _record(decision_reason="x", no_trade_reason="LOW_CONFIDENCE"),
+        note="Même refus depuis 23:08 UTC — 4 cycles consécutifs",
+    )
+    assert "🚫 SIGNAL REJETÉ XAUUSD (15m)" in text
+    assert "Même refus depuis 23:08 UTC — 4 cycles consécutifs" in text
+
+
+def test_send_rejection_passes_note(monkeypatch):
+    settings = Settings(
+        telegram_bot_token="123:abc", telegram_chat_id="987", telegram_rejection_alerts=True
+    )
+    notifier = TelegramNotifier(settings)
+    captured: dict = {}
+    monkeypatch.setattr(
+        notifier, "send", lambda text: captured.setdefault("text", text) or True
+    )
+    notifier.send_rejection(_record(decision_reason="x"), note="rappel")
+    assert "rappel" in captured["text"]
 
 
 def test_send_signal_passes_record_and_proposal_id(telegram_settings, monkeypatch):
