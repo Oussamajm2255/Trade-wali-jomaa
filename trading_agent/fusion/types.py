@@ -48,6 +48,9 @@ class NoTradeReason(StrEnum):
     # Phase G (V-MONSTER §42-§49/§64): the expected lead time is shorter
     # than the human reaction window — the trader cannot act in time.
     TOO_LATE = "TOO_LATE"
+    # Phase H (V-MONSTER §58/§59): the calibrated confidence tier is LOW
+    # — the signal's own historical bucket is below the tier floor.
+    LOW_TIER = "LOW_TIER"
     NEWS_RISK = "NEWS_RISK"
     SHOCK = "SHOCK"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"

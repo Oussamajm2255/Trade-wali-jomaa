@@ -22,6 +22,7 @@ from trading_agent.data.calendar import blocking_events
 from trading_agent.data.shock import ShockState
 from trading_agent.data.speed import SpeedState
 from trading_agent.fusion.room import compute_room
+from trading_agent.fusion.tier import ConfidenceTier, assign_tier, tier_size_mult
 from trading_agent.fusion.types import ConflictState, FusionContext, NoTradeReason
 from trading_agent.schema.types import AgentVerdict, Rejection, Side, SignalProposal
 from trading_agent.store.db import session_scope
@@ -322,6 +323,32 @@ class RiskEngine:
             else:
                 mark("statistical_quality", "pass", "gate disabled")
 
+            # --- Confidence tier gate (V-MONSTER §58/§59, Phase H). ---
+            # The calibrated win rate of the signal's own confidence
+            # bucket decides the tier: HIGH trades full size, MEDIUM is
+            # capped below, LOW — a sufficient sample that says the
+            # bucket loses money — is refused. Uncalibrated data is
+            # MEDIUM (honest, not a block — spec §4/§21).
+            calibrated = fusion_context.calibrated_confidence if fusion_context else None
+            tier = assign_tier(calibrated, self.s)
+            if tier == ConfidenceTier.LOW:
+                detail = (
+                    f"calibrated confidence {calibrated:.2f} below tier floor "
+                    f"{self.s.tier_low_max_calibrated}"
+                )
+                mark("tier", "reject", detail)
+                return Rejection(
+                    symbol=symbol,
+                    reason=f"LOW confidence tier: {detail}",
+                    no_trade_reason=NoTradeReason.LOW_TIER.value,
+                )
+            mark(
+                "tier",
+                "pass",
+                f"{tier.value}"
+                + (f" calibrated {calibrated:.2f}" if calibrated is not None else " uncalibrated"),
+            )
+
             # DXY concurrency hard gate (gold): the dollar must agree with
             # the trade direction or the signal is refused — no exceptions.
             if self.s.dxy_filter_enabled and gauge and gauge.get("kind") == "dxy":
@@ -375,7 +402,10 @@ class RiskEngine:
             exposure = sum(p.size * p.entry for p in open_positions)
             stop_distance = atr * self.s.atr_stop_mult
             risk_amount = state.equity * self.s.risk_per_trade
-            size = risk_amount / stop_distance
+            # Tiered size cap (spec §59): HIGH full size, MEDIUM capped at
+            # tier_medium_size_cap. Absolute exposure/positions limits
+            # below are unchanged.
+            size = risk_amount / stop_distance * tier_size_mult(tier, self.s)
 
             # Exposure cap: shrink size if it would breach portfolio exposure.
             allowed = self.s.max_exposure * state.equity - exposure

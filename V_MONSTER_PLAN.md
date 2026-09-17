@@ -269,13 +269,26 @@ push gate. No V2 behaviour changes without a test proving parity.
   helper (2), orchestrator TOO_LATE gate (4), Telegram lines (2),
   dashboard KPI aggregation (3).
 
-### Phase H — Confidence tiers + A+/A/NO TRADE (§58, §59, §81)
-- Tier assignment from calibrated confidence + sample size (HIGH needs
-  calibration_min_samples; LOW → reject). Tiered size caps inside
-  risk/engine.py (absolute limits unchanged).
-- A+/A/NO TRADE labels in records + Telegram (A+ = top structural +
-  liquidity + timing + statistical bucket).
-- Tests: tier rules, sizing caps, label mapping.
+### Phase H — Confidence tiers + A+/A/NO TRADE (§58, §59, §81) ✅ DELIVERED
+- `fusion/tier.py` (new): ConfidenceTier HIGH/MEDIUM/LOW from the
+  calibrated win rate (`tier_high_min_calibrated` 0.6,
+  `tier_low_max_calibrated` 0.45); uncalibrated data is MEDIUM —
+  honest, never a block, never a promotion (spec §4/§21). Size
+  fractions: HIGH 1.0, MEDIUM `tier_medium_size_cap` (0.75), LOW 0.0.
+- Risk engine tier gate: LOW (a sufficient calibrated sample whose
+  bucket loses money) is refused with the classified NoTradeReason
+  LOW_TIER, right after the statistical-quality gate; the tier mark
+  always rides the gate trail. The tiered size cap is applied in
+  sizing; absolute exposure / positions / notional limits unchanged.
+- A+/A/NO TRADE labels (deterministic): A+ only when tier is HIGH AND
+  structural setup ≥ `a_plus_setup_quality_min` (0.7) AND timing
+  quality ≥ `a_plus_timing_min` (0.7) AND liquidity room ≥
+  `a_plus_room_min_r` (2.0 R); any other approved proposal is A;
+  rejections are NO TRADE. Stamped on the signal record (`signal_label`
+  column + `fusion.tier`, additive SQLite migration) and rendered in
+  Telegram on proposals (with palier) and rejections.
+- Tests: tier rules (6), risk-engine gate + sizing caps (5),
+  orchestrator stamping (3), Telegram label lines (4).
 
 ### Phase I — Live signal supervision + human execution feedback (§62, §63)
 - After send: supervise proposal each tick until approved/expired —
@@ -331,7 +344,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 531 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 549 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -358,9 +371,12 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase G — timing quality,
-  lead time / actionability deadline, expected execution drift, the
-  pre-send TOO_LATE gate and the actionable-signal-rate KPI are live.
+- **Current frontier**: the live bot is at Phase H — confidence tiers
+  (HIGH/MEDIUM/LOW from calibrated win rates) gate and size every
+  proposal, and every decision carries an A+/A/NO TRADE label. Phase G
+  is also live: timing quality, lead time / actionability deadline,
+  expected execution drift, the pre-send TOO_LATE gate and the
+  actionable-signal-rate KPI.
   Its confidence scores have no
   calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.

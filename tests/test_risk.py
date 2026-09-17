@@ -40,8 +40,10 @@ def test_long_sizing_math(seeded) -> None:
     assert isinstance(result, SignalProposal)
     assert result.stop == pytest.approx(49_000.0)  # 2 * ATR
     assert result.target == pytest.approx(52_000.0)  # 2R
-    # risk 1% of 10k = 100 USD over 1000 stop distance -> size 0.1
-    assert result.size == pytest.approx(0.1, rel=1e-6)
+    # risk 1% of 10k = 100 USD over 1000 stop distance -> size 0.1.
+    # No calibrated confidence -> MEDIUM tier -> tier_medium_size_cap
+    # (0.75) applies (V-MONSTER §59, Phase H) -> 0.075.
+    assert result.size == pytest.approx(0.075, rel=1e-6)
     assert result.side == Side.LONG
 
 

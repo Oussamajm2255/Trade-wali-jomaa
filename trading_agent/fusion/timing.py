@@ -230,6 +230,7 @@ def compute_timing(
         "components": components,
         "speed_state": speed.get("state"),
         "pace_per_minute": round(pace, 6) if pace is not None else None,
+        "room_r": room_r,  # raw R before the opposing pool (None = unmapped)
         "lead_time_s": round(lead, 2) if lead is not None else None,
         "reaction_s": round(reaction_s, 2),
         "deadline_epoch": deadline_dt.timestamp() if deadline_dt else None,

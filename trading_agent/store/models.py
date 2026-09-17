@@ -178,6 +178,9 @@ class SignalRecord(Base):
     final_decision: Mapped[str] = mapped_column(String(16), index=True)  # proposal | rejected
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     no_trade_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Phase H (V-MONSTER §81): the quality label of this decision.
+    # "A" / "A+" for approved proposals, "NO TRADE" for rejections.
+    signal_label: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     proposal_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # Phase E (V-MONSTER §40): the clustered opportunity this cycle
     # belongs to, and its lifecycle state at decision time.

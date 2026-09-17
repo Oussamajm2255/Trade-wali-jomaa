@@ -73,6 +73,8 @@ def _migrate_sqlite(engine: Engine) -> None:
         for name, sqltype in (
             ("opportunity_id", "VARCHAR(128)"),
             ("opportunity_state", "VARCHAR(16)"),
+            # Phase H (§81): A+/A/NO TRADE quality label.
+            ("signal_label", "VARCHAR(16)"),
         ):
             if sig_columns and name not in sig_columns:
                 conn.exec_driver_sql(f"ALTER TABLE signals ADD COLUMN {name} {sqltype}")

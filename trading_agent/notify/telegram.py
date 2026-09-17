@@ -165,6 +165,11 @@ class TelegramNotifier:
         if sq is not None:
             state = conflicts.get("state")
             lines.append(f"Qualité du setup : {sq:.2f}" + (f" (conflits : {state})" if state else ""))
+        # Phase H (§81): A+/A label with its confidence tier.
+        label = record.get("signal_label")
+        tier = fusion.get("tier")
+        if label:
+            lines.append(f"Label : {label}" + (f" (palier {tier})" if tier else ""))
 
         mtf = snap.get("mtf_biases") or {}
         ordered = [tf for tf in _MTF_ORDER if tf in mtf] + sorted(set(mtf) - set(_MTF_ORDER))
@@ -282,6 +287,10 @@ class TelegramNotifier:
         ]
         if note:
             lines.append(note)
+        # Phase H (§81): rejections always carry the NO TRADE label.
+        label = record.get("signal_label")
+        if label:
+            lines.append(f"Label : {label}")
         outputs = record.get("ai_outputs") or {}
         if not outputs:
             lines += self._trace_lines(record)

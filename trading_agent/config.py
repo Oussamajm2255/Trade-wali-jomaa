@@ -256,6 +256,19 @@ class Settings(BaseSettings):
     telegram_latency_s: float = 3.0  # delivery latency on top
     max_chase_atr_mult: float = 0.5  # execution-zone half-width, 0 = disabled
 
+    # --- Confidence tiers + A+/A/NO TRADE (V-MONSTER §58/§59/§81, Phase H) ---
+    # HIGH needs a calibrated win rate (historical outcomes in the
+    # signal's own confidence bucket) at/above the floor; LOW (below the
+    # ceiling) refuses the proposal; uncalibrated history is MEDIUM and
+    # is capped in size. A+ = top structural + liquidity + timing +
+    # statistical bucket; absolute position/exposure limits unchanged.
+    tier_high_min_calibrated: float = 0.6  # calibrated win rate -> HIGH
+    tier_low_max_calibrated: float = 0.45  # below this -> LOW (reject)
+    tier_medium_size_cap: float = 0.75  # MEDIUM size fraction (HIGH = 1.0)
+    a_plus_setup_quality_min: float = 0.7  # structural floor for A+
+    a_plus_timing_min: float = 0.7  # timing floor for A+
+    a_plus_room_min_r: float = 2.0  # room-to-target floor for A+
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.

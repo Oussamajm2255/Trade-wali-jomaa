@@ -31,6 +31,7 @@ from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.quality import QualityState
 from trading_agent.data.snapshot import MarketSnapshot, build_market_snapshot
 from trading_agent.fusion.engine import build_fusion_context, fuse_verdicts
+from trading_agent.fusion.tier import NO_TRADE_LABEL, assign_tier, signal_label
 from trading_agent.fusion.timing import compute_timing
 from trading_agent.fusion.types import FusionContext, FusionResult, NoTradeReason
 from trading_agent.risk.engine import RiskEngine
@@ -541,6 +542,17 @@ class Orchestrator:
         )
         if opp is not None:
             opp["timing"] = timing
+        # Phase H (V-MONSTER §58/§59/§81): confidence tier + quality
+        # label. The label rides on the opportunity context so the
+        # record and Telegram render it; the risk engine's LOW gate and
+        # MEDIUM size cap use the same tier inputs.
+        tier = assign_tier(fusion_context.calibrated_confidence, self.settings)
+        label = signal_label(
+            tier, fusion_context.setup_quality.score, timing, self.settings
+        )
+        if opp is not None:
+            opp["tier"] = tier.value
+            opp["label"] = label
         if not self.settings.timing_gate_enabled or not timing["too_late"]:
             gates.append({"gate": "timing", "status": "pass", "detail": timing["detail"]})
             return None
@@ -628,6 +640,14 @@ class Orchestrator:
             # both carry it.
             if opportunity and opportunity.get("timing"):
                 record["fusion"]["timing"] = opportunity["timing"]
+            # Phase H (§81): tier and label stamped for the record +
+            # Telegram (A+ = top structural + liquidity + timing +
+            # statistical bucket; A otherwise; NO TRADE = rejection).
+            if opportunity and opportunity.get("tier"):
+                record["fusion"]["tier"] = opportunity["tier"]
+            record["signal_label"] = (
+                opportunity.get("label") if opportunity and opportunity.get("label") else "A"
+            )
             record["setup_quality"] = fusion_context.setup_quality.model_dump()
             record["conflicts"] = fusion_context.conflict.model_dump()
         if isinstance(result, SignalProposal):
@@ -642,6 +662,7 @@ class Orchestrator:
             record.update(
                 decision_reason=result.reason,
                 no_trade_reason=getattr(result, "no_trade_reason", None),
+                signal_label=NO_TRADE_LABEL,
             )
         try:
             actions.record_signal(record)
