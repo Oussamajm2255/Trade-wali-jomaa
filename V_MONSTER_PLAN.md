@@ -243,16 +243,31 @@ push gate. No V2 behaviour changes without a test proving parity.
   (pass/drift/spread/stale/disabled/no-source/fetch-failure, 7), tick
   sources (5).
 
-### Phase G — Timing, actionability, execution model (§42-§49, §64)
-- `fusion/timing.py` (new): TIMING_QUALITY 0-1 (trigger maturity,
-  speed, remaining room, drift, lifecycle); SIGNAL_LEAD_TIME;
-  ACTIONABILITY_DEADLINE; EXPECTED_EXECUTION_PRICE/DRIFT from
-  `user_reaction_seconds` + `telegram latency` + spread + speed.
-- New NoTradeReason TOO_LATE when deadline exceeded pre-send.
-- KPI ACTIONABLE_SIGNAL_RATE in dashboard + audit.
-- Telegram: execution zone, max chase, valid-until, deadline, timing
-  quality, expected drift.
-- Tests: timing scoring, deadline math, KPI aggregation.
+### Phase G — Timing, actionability, execution model (§42-§49, §64) ✅ DELIVERED
+- `fusion/timing.py` (new): TIMING_QUALITY 0-1 from five deterministic
+  components — trigger maturity (structure-event freshness), speed
+  (SLOW 1.0 / NORMAL 0.8 / FAST 0.5 / EXTREME 0.2), remaining room
+  (room-to-target in R, normalized), drift (expected move during the
+  reaction window + spread cost vs stop distance), lifecycle
+  (opportunity age vs TTL). Missing axes score a neutral 0.5, never
+  fabricated.
+- SIGNAL_LEAD_TIME from the speed-adjusted pace (range/ATR per minute ×
+  state multiplier), capped at the opportunity TTL;
+  ACTIONABILITY_DEADLINE = now + lead (epoch + ISO).
+- EXPECTED_EXECUTION_PRICE/DRIFT from `user_reaction_seconds` +
+  `telegram_latency_s` + spread + speed; execution zone (entry ±
+  `max_chase_atr_mult` × ATR) + max chase exposed to Telegram.
+- New NoTradeReason TOO_LATE: orchestrator pre-send gate after Phase F
+  revalidation aborts the send when lead ≤ reaction window (recorded
+  rejection + `signal_too_late_pre_send` audit; uncomputable pace
+  fails open). Timing payload stamped on the signal record.
+- KPI ACTIONABLE_SIGNAL_RATE in the dashboard (proposals / (proposals
+  + TOO_LATE), today) + audit trail; new "Signaux actionnables" card.
+- Telegram: timing quality + label, execution zone, max chase, expected
+  price (drift), valid-until deadline.
+- Tests: timing scoring (10), lead/deadline math (6), opportunity age
+  helper (2), orchestrator TOO_LATE gate (4), Telegram lines (2),
+  dashboard KPI aggregation (3).
 
 ### Phase H — Confidence tiers + A+/A/NO TRADE (§58, §59, §81)
 - Tier assignment from calibrated confidence + sample size (HIGH needs
@@ -316,7 +331,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 506 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 531 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -343,9 +358,10 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase F — signal stability
-  classification + final real-time revalidation are live. Its
-  confidence scores have no
+- **Current frontier**: the live bot is at Phase G — timing quality,
+  lead time / actionability deadline, expected execution drift, the
+  pre-send TOO_LATE gate and the actionable-signal-rate KPI are live.
+  Its confidence scores have no
   calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP

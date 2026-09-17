@@ -111,6 +111,20 @@ def collect(session: Session, limit: int = 5000) -> dict:
         select(func.count()).select_from(Position).where(Position.opened_at >= today_start)
     ) or 0
 
+    # ACTIONABLE_SIGNAL_RATE (V-MONSTER §64): proposals over proposals +
+    # TOO_LATE aborts — how often the human actually got an actionable
+    # signal today. TOO_LATE is the only timing-driven pre-send abort.
+    too_late_today = sum(
+        1 for r in recent
+        if r.final_decision == "rejected"
+        and r.no_trade_reason == "TOO_LATE"
+        and _utc(r.ts) >= today_start
+    )
+    actionable_denom = proposals_today + too_late_today
+    actionable_rate = (
+        round(proposals_today / actionable_denom, 4) if actionable_denom else None
+    )
+
     overall = compute_trade_stats([(r.outcome, r.r_multiple) for r in resolved])
     buckets = confidence_buckets(resolved)
 
@@ -211,6 +225,7 @@ def collect(session: Session, limit: int = 5000) -> dict:
             "proposals": proposals_today,
             "rejected": rejected_today,
             "trades": trades_today,
+            "actionable_rate": actionable_rate,
         },
         "overall": overall.to_dict(),
         "resolved_count": len(resolved),
@@ -336,6 +351,11 @@ def render_html(data: dict) -> str:
         for k, v in (
             ("Propositions du jour", today["proposals"]),
             ("Signaux rejetés du jour", today["rejected"]),
+            (
+                "Signaux actionnables",
+                f"{today['actionable_rate'] * 100:.1f}%"
+                if today["actionable_rate"] is not None else "—",
+            ),
             ("Trades ouverts du jour", today["trades"]),
         )
     )

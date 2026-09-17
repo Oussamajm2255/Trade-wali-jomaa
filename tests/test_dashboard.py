@@ -188,7 +188,7 @@ def test_render_html_escapes_markup():
                     "price": None, "regime": "—", "session": "—", "alignment": "—",
                     "dxy_gauge": {}, "dxy_context": {}, "confidence": None,
                     "calibrated": None, "setup_quality": None, "mtf_biases": {}},
-        "today": {"proposals": 0, "rejected": 0, "trades": 0},
+        "today": {"proposals": 0, "rejected": 0, "trades": 0, "actionable_rate": None},
         "overall": {"trades": 0, "wins": 0, "losses": 0, "win_rate": None,
                     "expectancy_r": None, "avg_r": None, "profit_factor": None,
                     "total_r": 0.0, "max_drawdown_r": 0.0},

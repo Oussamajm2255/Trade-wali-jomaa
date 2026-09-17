@@ -244,6 +244,18 @@ class Settings(BaseSettings):
     revalidate_max_drift_pct: float = 0.15  # |tick - entry| / entry * 100
     revalidate_max_age_s: float = 600  # tick older than this = stale
 
+    # --- Signal timing + actionability (V-MONSTER §42-§49/§64, Phase G) ---
+    # TIMING_QUALITY 0-1 (trigger maturity, speed, remaining room,
+    # drift, lifecycle); SIGNAL_LEAD_TIME from the speed-adjusted pace;
+    # ACTIONABILITY_DEADLINE = now + lead; EXPECTED_EXECUTION_PRICE/
+    # DRIFT over the human reaction window (reaction + Telegram latency
+    # + spread). TOO_LATE refuses the send when the expected lead time
+    # is shorter than the reaction window.
+    timing_gate_enabled: bool = True
+    user_reaction_seconds: float = 120.0  # human reaction budget
+    telegram_latency_s: float = 3.0  # delivery latency on top
+    max_chase_atr_mult: float = 0.5  # execution-zone half-width, 0 = disabled
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.

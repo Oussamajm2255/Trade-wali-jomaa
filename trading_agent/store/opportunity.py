@@ -101,6 +101,25 @@ def opportunity_id(symbol: str, timeframe: str, side: Side, anchor: str | None) 
     return f"{symbol.upper()}:{timeframe}:{side.value}:{anchor}"
 
 
+def opportunity_age_minutes(oid: str, now: datetime | None = None) -> float | None:
+    """Age of a tracked opportunity in minutes; None when unknown.
+
+    Feeds the Phase G timing lifecycle component (how much of the
+    opportunity TTL has been consumed). Best-effort by contract: a
+    storage failure returns None and the component scores neutral.
+    """
+    now = now or utcnow()
+    try:
+        with session_scope() as session:
+            row = session.get(Opportunity, oid)
+            if row is None:
+                return None
+            return max(0.0, (now - _as_utc(row.first_seen_ts)).total_seconds() / 60.0)
+    except Exception as exc:  # noqa: BLE001 - timing must never kill the cycle
+        logger.warning("opportunity age lookup failed for %s: %s", oid, exc)
+        return None
+
+
 def dedup_verdict(
     symbol: str,
     timeframe: str,

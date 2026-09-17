@@ -209,6 +209,7 @@ class TelegramNotifier:
             lines.append("Invalidation : " + contribution.invalidation)
         lines.extend(self._liquidity_vwap_lines(snap))
         lines.extend(self._speed_trigger_lines(snap, record))
+        lines.extend(self._timing_lines(record))
 
         trail = []
         for gate in gates:
@@ -422,6 +423,34 @@ class TelegramNotifier:
         if trigger.get("quality") is not None:
             state = "confirmé" if trigger.get("confirmed") else "non confirmé"
             lines.append(f"Déclencheur : {float(trigger['quality']):.2f} ({state})")
+        return lines
+
+    def _timing_lines(self, record: dict) -> list[str]:
+        """Phase G (V-MONSTER §42-§49/§64): timing quality, execution
+        zone, max chase, expected price/drift, actionability deadline."""
+        lines: list[str] = []
+        timing = (record.get("fusion") or {}).get("timing") or {}
+        if not timing:
+            return lines
+        quality = timing.get("quality")
+        if quality is not None:
+            q = float(quality)
+            label = (
+                "excellent" if q >= 0.8 else "bon" if q >= 0.6
+                else "moyen" if q >= 0.4 else "faible"
+            )
+            lines.append(f"Timing : {q:.2f} ({label})")
+        zone = timing.get("execution_zone")
+        if zone and len(zone) == 2 and timing.get("max_chase") > 0:
+            lines.append(f"Zone d'exécution : {float(zone[0]):,.2f} – {float(zone[1]):,.2f}")
+            lines.append(f"Chasse max : {float(timing['max_chase']):,.2f}")
+        if timing.get("expected_price") is not None:
+            lines.append(
+                f"Prix attendu : {float(timing['expected_price']):,.2f}"
+                f" (dérive {float(timing['expected_drift'] or 0):,.2f})"
+            )
+        if timing.get("deadline_iso"):
+            lines.append(f"Valable jusqu'à : {timing['deadline_iso']}")
         return lines
 
     def _trace_lines(self, record: dict) -> list[str]:

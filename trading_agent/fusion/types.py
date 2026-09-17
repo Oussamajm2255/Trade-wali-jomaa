@@ -45,6 +45,9 @@ class NoTradeReason(StrEnum):
     # Phase F (V-MONSTER §56): final real-time revalidation aborted the
     # send — price drifted, spread blew out or the data went stale.
     SIGNAL_INVALIDATED = "SIGNAL_INVALIDATED"
+    # Phase G (V-MONSTER §42-§49/§64): the expected lead time is shorter
+    # than the human reaction window — the trader cannot act in time.
+    TOO_LATE = "TOO_LATE"
     NEWS_RISK = "NEWS_RISK"
     SHOCK = "SHOCK"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"

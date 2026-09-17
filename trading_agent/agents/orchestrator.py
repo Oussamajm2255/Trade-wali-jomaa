@@ -31,6 +31,7 @@ from trading_agent.data.market import MarketData, MarketDataError
 from trading_agent.data.quality import QualityState
 from trading_agent.data.snapshot import MarketSnapshot, build_market_snapshot
 from trading_agent.fusion.engine import build_fusion_context, fuse_verdicts
+from trading_agent.fusion.timing import compute_timing
 from trading_agent.fusion.types import FusionContext, FusionResult, NoTradeReason
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import (
@@ -214,7 +215,19 @@ class Orchestrator:
                 settings=self.settings,
                 now=now,
             )
-        return {"anchor": anchor, "opportunity_id": oid, "side": side, "verdict": verdict}
+        # Phase G (V-MONSTER §42-§49): the tracked opportunity's age
+        # feeds the timing lifecycle component. Best-effort lookup —
+        # unknown age scores neutral, never blocks.
+        age_min = None
+        if oid:
+            age_min = opportunity_store.opportunity_age_minutes(oid, now)
+        return {
+            "anchor": anchor,
+            "opportunity_id": oid,
+            "side": side,
+            "verdict": verdict,
+            "age_min": age_min,
+        }
 
     def run_full(
         self,
@@ -403,6 +416,15 @@ class Orchestrator:
             invalid = self._revalidate_before_send(symbol, result, gates)
             if invalid is not None:
                 result = invalid
+            else:
+                # Timing + actionability gate (V-MONSTER §42-§49/§64):
+                # TOO_LATE when the expected lead time is shorter than
+                # the human reaction window. The timing payload rides
+                # along on the opportunity context so the record and
+                # Telegram can render it.
+                late = self._timing_before_send(symbol, result, snap, fusion_context, opp, gates, now)
+                if late is not None:
+                    result = late
         return result, verdicts, entry, snap.dxy, snap, fusion_context, gates, opp
 
     def _revalidate_before_send(
@@ -482,6 +504,65 @@ class Orchestrator:
         )
         return None
 
+    def _timing_before_send(
+        self,
+        symbol: str,
+        proposal: SignalProposal,
+        snap: MarketSnapshot,
+        fusion_context: FusionContext,
+        opp: dict | None,
+        gates: list[dict],
+        now: datetime | None,
+    ) -> Rejection | None:
+        """Timing + actionability gate (V-MONSTER §42-§49/§64).
+
+        Computes TIMING_QUALITY, lead time, deadline and expected
+        execution drift and stamps them on the opportunity context (the
+        record and Telegram read them from there). TOO_LATE rejects the
+        send when the expected lead time is shorter than the human
+        reaction window — an uncomputable pace never blocks (spec §4).
+        """
+        indicators = (snap.indicators or {}).get(snap.entry_timeframe) or {}
+        atr = float(indicators.get("atr_14") or 0.0)
+        # The proposal's own side — never the fusion context's (the
+        # context re-fuses the real verdicts, which may be NEUTRAL even
+        # when the pipeline's fused side produced the proposal).
+        timing = compute_timing(
+            proposal.side,
+            snap,
+            self.settings,
+            entry=proposal.entry,
+            stop=proposal.stop,
+            target=proposal.target,
+            atr=atr,
+            spread_pct=fusion_context.spread_pct,
+            opportunity_age_min=(opp or {}).get("age_min"),
+            now=now,
+        )
+        if opp is not None:
+            opp["timing"] = timing
+        if not self.settings.timing_gate_enabled or not timing["too_late"]:
+            gates.append({"gate": "timing", "status": "pass", "detail": timing["detail"]})
+            return None
+        detail = (
+            f"lead time {timing['lead_time_s']:.0f}s <= reaction "
+            f"{timing['reaction_s']:.0f}s"
+        )
+        gates.append({"gate": "timing", "status": "reject", "detail": detail})
+        try:
+            actions.audit(
+                "WARNING",
+                "signal_too_late_pre_send",
+                {"symbol": symbol, "detail": detail, "timing": timing},
+            )
+        except Exception:  # noqa: BLE001 - audit must never kill the cycle
+            pass
+        return Rejection(
+            symbol=symbol,
+            reason=f"signal too late pre-send: {detail}",
+            no_trade_reason=NoTradeReason.TOO_LATE.value,
+        )
+
     def _record_signal(
         self,
         signal_id: str,
@@ -542,6 +623,11 @@ class Orchestrator:
                 "trigger": fusion_context.trigger,
                 "stability": fusion_context.stability,
             }
+            # Phase G timing (V-MONSTER §42-§49/§64) rides along on the
+            # opportunity context; proposals and TOO_LATE rejections
+            # both carry it.
+            if opportunity and opportunity.get("timing"):
+                record["fusion"]["timing"] = opportunity["timing"]
             record["setup_quality"] = fusion_context.setup_quality.model_dump()
             record["conflicts"] = fusion_context.conflict.model_dump()
         if isinstance(result, SignalProposal):
