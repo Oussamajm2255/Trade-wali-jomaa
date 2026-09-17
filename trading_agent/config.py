@@ -210,6 +210,18 @@ class Settings(BaseSettings):
     trigger_confirm_min: float = 0.6
     trigger_event_window: int = 12  # recency window for structure events
 
+    # --- Opportunity clustering + dedup (V-MONSTER §31/§40/§41/§52/§53, Phase E) ---
+    # One OPPORTUNITY_ID = direction + structure event + time proximity,
+    # derived deterministically from the snapshot. The dedup gate
+    # suppresses re-signals of the same opportunity: a pending stronger
+    # signal blocks weaker re-signals (OPPORTUNITY_ACTIVE), and any
+    # recent proposal at a close price is SIGNAL_DUPLICATE. No anchor,
+    # no data or a DB failure never blocks (honesty, §4).
+    opportunity_dedup_enabled: bool = True
+    opportunity_dedup_window_minutes: int = 180  # time proximity
+    opportunity_price_tolerance_pct: float = 0.1  # "close price" band
+    opportunity_ttl_minutes: int = 720  # FORMING -> EXPIRED lifetime
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.

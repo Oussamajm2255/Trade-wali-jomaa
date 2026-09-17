@@ -180,14 +180,37 @@ push gate. No V2 behaviour changes without a test proving parity.
   separation/confirmation (8), displacement scoring (3), engine gate
   (3), snapshot wiring (1).
 
-### Phase E — Opportunity clustering + signal dedup/suppression (§31, §40, §41, §52, §53, §79)
-- `store/opportunity.py` (new): OPPORTUNITY_ID grouping by direction +
-  structure event + time proximity; lifecycle states FORMING→…→EXPIRED;
-  proposal dedup (same opportunity, same direction, close price, short
-  window → suppress duplicate), weaker-opportunity suppression.
-- Signal decision states in schema; NoTradeReason OPPORTUNITY_ACTIVE /
-  SIGNAL_DUPLICATE.
-- Tests: clustering, dedup window, lifecycle transitions.
+### Phase E — Opportunity clustering + signal dedup/suppression (§31, §40, §41, §52, §53, §79) — ✅ DELIVERED
+- `store/opportunity.py` (new): deterministic OPPORTUNITY_ID =
+  `{SYMBOL}:{TF}:{side}:{anchor}`; anchor priority = most recent
+  same-direction BOS → same-direction displacement → trigger-side
+  liquidity pool (lows for LONG, highs for SHORT); NEUTRAL side or
+  unreadable structure → no anchor → dedup never blocks (honesty).
+- Dedup verdict: a pending stronger proposal for the same opportunity
+  suppresses a weaker re-signal (OPPORTUNITY_ACTIVE) while a stronger
+  one supersedes at save time; any recent proposal (dedup window,
+  default 180m) whose stored snapshot price is within the tolerance
+  band (default 0.1%) of the current price → SIGNAL_DUPLICATE; window
+  and price comparisons run in Python with tz-normalized timestamps;
+  disabled config, no anchor or a DB failure fails open (never blocks).
+- Lifecycle: `Opportunity` table row upserted every cycle — FORMING →
+  TRIGGERED (with trigger_signal_id, never downgraded) → EXPIRED when
+  un-triggered past `opportunity_ttl_minutes` (default 720).
+- `schema/types.py`: `DecisionState` enum (PENDING/APPROVED/REJECTED/
+  EXPIRED/SUPERSEDED); `SignalProposal.status` now uses it; actions
+  (save/decide/revert) read/write the enum values.
+- `fusion/types.py`: NoTradeReason OPPORTUNITY_ACTIVE, SIGNAL_DUPLICATE.
+- `orchestrator.py`: dedup gate between fusion (side known) and the
+  risk engine — rejection carries the no_trade_reason and a gate-trail
+  entry; every signal record is stamped with `opportunity_id` and
+  `opportunity_state` (TRIGGERED for proposals, FORMING for rejections;
+  stamping is forensics and runs even with dedup disabled);
+  `_run_pipeline` returns the opportunity context as an 8th element.
+- `store/db.py`: additive SQLite migration for `signals.opportunity_id`
+  + `signals.opportunity_state`.
+- Tests: anchor/id derivation (5), dedup verdict window/price/pending
+  semantics (10), lifecycle transitions (2), orchestrator gate + record
+  stamping + disabled-config honesty (3).
 
 ### Phase F — Signal stability + final real-time revalidation (§32, §56)
 - `fusion/stability.py` (new): STABLE/FRAGILE/VERY_FRAGILE via score,
@@ -270,7 +293,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 466 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 486 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -297,8 +320,8 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase D — market speed +
-  displacement/trigger quality are live. Its confidence scores have no
+- **Current frontier**: the live bot is at Phase E — opportunity
+  clustering + signal dedup are live. Its confidence scores have no
   calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP

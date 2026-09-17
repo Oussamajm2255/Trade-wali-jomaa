@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 
-from trading_agent.schema.types import Side, SignalProposal, utcnow
+from trading_agent.schema.types import DecisionState, Side, SignalProposal, utcnow
 from trading_agent.store.db import session_scope
 from trading_agent.store.models import (
     AgentTrack,
@@ -30,7 +30,7 @@ def save_proposal(proposal: SignalProposal) -> str:
         for stale in session.scalars(
             select(Proposal).where(Proposal.symbol == proposal.symbol, Proposal.status == "pending")
         ):
-            stale.status = "expired"
+            stale.status = DecisionState.EXPIRED.value
             stale.decided_at = now
             stale.decision_note = "superseded by newer proposal"
         row = Proposal(
@@ -47,7 +47,7 @@ def save_proposal(proposal: SignalProposal) -> str:
             rationale=proposal.rationale,
             evidence=proposal.evidence,
             model=proposal.model,
-            status="pending",
+            status=DecisionState.PENDING.value,
         )
         session.add(row)
         session.add(
@@ -89,7 +89,7 @@ def decide_proposal(proposal_id: str, approve: bool, note: str = "") -> SignalPr
         row = session.get(Proposal, proposal_id)
         if row is None or row.status != "pending":
             return None
-        row.status = "approved" if approve else "rejected"
+        row.status = DecisionState.APPROVED.value if approve else DecisionState.REJECTED.value
         row.decided_at = utcnow()
         row.decision_note = note or ("approved via CLI" if approve else "rejected via CLI")
         session.add(
@@ -108,7 +108,7 @@ def revert_proposal(proposal_id: str, reason: str) -> None:
         row = session.get(Proposal, proposal_id)
         if row is None or row.status != "approved":
             return
-        row.status = "pending"
+        row.status = DecisionState.PENDING.value
         row.decided_at = None
         row.decision_note = reason
         session.add(

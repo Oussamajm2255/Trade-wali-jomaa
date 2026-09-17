@@ -68,6 +68,14 @@ def _migrate_sqlite(engine: Engine) -> None:
         risk_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(risk_state)")}
         if risk_columns and "last_shock_ts" not in risk_columns:
             conn.exec_driver_sql("ALTER TABLE risk_state ADD COLUMN last_shock_ts DATETIME")
+        # Phase E (§40): opportunity clustering columns on signal records.
+        sig_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(signals)")}
+        for name, sqltype in (
+            ("opportunity_id", "VARCHAR(128)"),
+            ("opportunity_state", "VARCHAR(16)"),
+        ):
+            if sig_columns and name not in sig_columns:
+                conn.exec_driver_sql(f"ALTER TABLE signals ADD COLUMN {name} {sqltype}")
 
 
 def _seed_risk_state() -> None:

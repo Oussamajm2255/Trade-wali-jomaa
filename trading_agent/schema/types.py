@@ -28,6 +28,21 @@ class Bias(StrEnum):
     NEUTRAL = "neutral"
 
 
+class DecisionState(StrEnum):
+    """Lifecycle of one signal proposal (V-MONSTER §79).
+
+    The states the human decision can move a proposal through:
+    PENDING (sent, awaiting decision), APPROVED / REJECTED (human
+    verdict), EXPIRED (superseded or stale), SUPERSEDED (replaced by
+    a newer proposal for the same symbol)."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    SUPERSEDED = "superseded"
+
+
 class Regime(StrEnum):
     TRENDING_UP = "trending_up"
     TRENDING_DOWN = "trending_down"
@@ -151,7 +166,9 @@ class SignalProposal(BaseModel):
     rationale: str
     evidence: dict
     model: str
-    status: str = "pending"
+    # Human-facing decision state (V-MONSTER §79); the stored strings
+    # predate the enum and stay byte-compatible with the DB.
+    status: str = DecisionState.PENDING.value
     created_at: datetime = Field(default_factory=utcnow)
 
 

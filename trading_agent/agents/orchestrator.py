@@ -36,10 +36,12 @@ from trading_agent.risk.engine import RiskEngine
 from trading_agent.schema.types import (
     AgentVerdict,
     Rejection,
+    Side,
     SignalProposal,
     utcnow,
 )
 from trading_agent.store import actions
+from trading_agent.store import opportunity as opportunity_store
 from trading_agent.versioning import version_stamp
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,38 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001 - tracking must never kill the cycle
             logger.warning("agent reliability tracking failed: %s", exc)
 
+    def _opportunity_context(
+        self,
+        symbol: str,
+        timeframe: str,
+        side: Side,
+        snap: MarketSnapshot,
+        fusion_context: FusionContext,
+        now: datetime | None,
+    ) -> dict:
+        """Deterministic opportunity identity + dedup verdict (Phase E).
+
+        OPPORTUNITY_ID = direction + structure event + time proximity,
+        derived from the canonical snapshot. The verdict is None (allow)
+        or {"no_trade_reason", "detail"} (suppress). No anchor never
+        blocks — dedup is only possible when the structure is readable.
+        """
+        anchor = opportunity_store.anchor_from_snapshot(snap, side)
+        oid = opportunity_store.opportunity_id(symbol, timeframe, side, anchor)
+        verdict = None
+        if self.settings.opportunity_dedup_enabled:
+            verdict = opportunity_store.dedup_verdict(
+                symbol,
+                timeframe,
+                side,
+                anchor,
+                price=snap.price,
+                setup_score=fusion_context.setup_quality.score,
+                settings=self.settings,
+                now=now,
+            )
+        return {"anchor": anchor, "opportunity_id": oid, "side": side, "verdict": verdict}
+
     def run_full(
         self,
         symbol: str,
@@ -200,7 +234,7 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001 - recording must never kill the cycle
             logger.warning("signal id generation failed: %s", exc)
             signal_id = None
-        result, verdicts, entry, gauge, snap, fusion_context, gates = self._run_pipeline(
+        result, verdicts, entry, gauge, snap, fusion_context, gates, opp = self._run_pipeline(
             symbol, timeframe, signal_id, now
         )
         if signal_id:
@@ -208,7 +242,7 @@ class Orchestrator:
                 result.signal_id = signal_id
             self._record_signal(
                 signal_id, symbol, timeframe, result, snap, verdicts, entry,
-                fusion_context, gates, now,
+                fusion_context, gates, opp, now,
             )
         return result, verdicts, entry, gauge
 
@@ -226,6 +260,7 @@ class Orchestrator:
         MarketSnapshot | None,
         FusionContext | None,
         list[dict],
+        dict | None,
     ]:
         """Analysis pipeline; every gate decision lands in the trail."""
         gates: list[dict] = []
@@ -242,7 +277,7 @@ class Orchestrator:
             )
             return (
                 Rejection(symbol=symbol, reason=f"market data unavailable: {exc}"),
-                {}, {}, None, None, None, gates,
+                {}, {}, None, None, None, gates, None,
             )
         gates.append({"gate": "market_data", "status": "pass"})
         htf_tf = (
@@ -257,7 +292,7 @@ class Orchestrator:
             )
             return (
                 Rejection(symbol=symbol, reason=f"data quality FAIL: {'; '.join(snap.quality_issues[:3])}"),
-                {}, entry, snap.dxy, snap, None, gates,
+                {}, entry, snap.dxy, snap, None, gates, None,
             )
         if snap.degraded and not self.settings.data_quality_allow_degraded:
             gates.append(
@@ -268,7 +303,7 @@ class Orchestrator:
                     symbol=symbol,
                     reason=f"data quality DEGRADED (blocked by config): {'; '.join(snap.quality_issues[:3])}",
                 ),
-                {}, entry, snap.dxy, snap, None, gates,
+                {}, entry, snap.dxy, snap, None, gates, None,
             )
         gates.append({"gate": "data_quality", "status": "pass"})
 
@@ -280,7 +315,7 @@ class Orchestrator:
             gates.append({"gate": "cost_control", "status": "reject", "detail": cost_reason})
             return (
                 Rejection(symbol=symbol, reason=cost_reason),
-                {}, entry, snap.dxy, snap, None, gates,
+                {}, entry, snap.dxy, snap, None, gates, None,
             )
         gates.append({"gate": "cost_control", "status": "pass"})
 
@@ -291,7 +326,7 @@ class Orchestrator:
             gates.append({"gate": "agents", "status": "reject", "detail": "all analysis agents failed"})
             return (
                 Rejection(symbol=symbol, reason="all analysis agents failed"),
-                verdicts, entry, snap.dxy, snap, None, gates,
+                verdicts, entry, snap.dxy, snap, None, gates, None,
             )
 
         # AI reliability tracking (spec §15): every verdict, every cycle.
@@ -311,7 +346,7 @@ class Orchestrator:
             gates.append({"gate": "agents", "status": "reject", "detail": block_reason})
             return (
                 Rejection(symbol=symbol, reason=block_reason),
-                verdicts, entry, snap.dxy, snap, None, gates,
+                verdicts, entry, snap.dxy, snap, None, gates, None,
             )
         gates.append({"gate": "agents", "status": "pass"})
 
@@ -320,6 +355,30 @@ class Orchestrator:
         # no-trade gates consume it; it never overrides a hard gate.
         fusion = self._fuse(verdicts)
         fusion_context = build_fusion_context(snap, verdicts, self.settings, htf_tf)
+
+        # Opportunity clustering + dedup (V-MONSTER §31/§40/§41/§52/§53):
+        # the same directional setup anchored at the same structure event
+        # inside the dedup window is not signalled twice. Deterministic,
+        # computed after fusion (side known) and before the risk engine.
+        opp = self._opportunity_context(
+            symbol, timeframe, fusion.side, snap, fusion_context, now
+        )
+        if opp["verdict"]:
+            gates.append(
+                {"gate": "opportunity", "status": "reject", "detail": opp["verdict"]["detail"]}
+            )
+            return (
+                Rejection(
+                    symbol=symbol,
+                    reason=f"opportunity duplicate: {opp['verdict']['detail']}",
+                    no_trade_reason=opp["verdict"]["no_trade_reason"],
+                ),
+                verdicts, entry, snap.dxy, snap, fusion_context, gates, opp,
+            )
+        gates.append(
+            {"gate": "opportunity", "status": "pass", "detail": opp["opportunity_id"] or "no anchor"}
+        )
+
         last = snap.candles[timeframe].iloc[-1]
         result = self.risk.evaluate(
             symbol=symbol,
@@ -336,7 +395,7 @@ class Orchestrator:
             trail=gates,
             now=now,
         )
-        return result, verdicts, entry, snap.dxy, snap, fusion_context, gates
+        return result, verdicts, entry, snap.dxy, snap, fusion_context, gates, opp
 
     def _record_signal(
         self,
@@ -349,6 +408,7 @@ class Orchestrator:
         entry: dict,
         fusion_context: FusionContext | None,
         gates: list[dict],
+        opportunity: dict | None,
         now: datetime | None,
     ) -> None:
         """Persist one complete signal record (spec §22), best-effort.
@@ -379,6 +439,11 @@ class Orchestrator:
             "decision_reason": None,
             "no_trade_reason": None,
         }
+        if opportunity and opportunity.get("opportunity_id"):
+            record["opportunity_id"] = opportunity["opportunity_id"]
+            record["opportunity_state"] = (
+                "TRIGGERED" if isinstance(result, SignalProposal) else "FORMING"
+            )
         if fusion_context:
             record["fusion"] = {
                 "direction_score": fusion_context.fusion.direction_score,
@@ -407,6 +472,23 @@ class Orchestrator:
             actions.record_signal(record)
         except Exception as exc:  # noqa: BLE001 - recording must never kill the cycle
             logger.warning("signal recording failed for %s: %s", signal_id, exc)
+        # Opportunity lifecycle upsert (V-MONSTER §31): FORMING ->
+        # TRIGGERED -> EXPIRED. Observability, best-effort like the record.
+        if opportunity and opportunity.get("anchor") and opportunity.get("opportunity_id"):
+            try:
+                opportunity_store.track_opportunity(
+                    opportunity["opportunity_id"],
+                    symbol,
+                    timeframe,
+                    side=opportunity["side"],
+                    anchor=opportunity["anchor"],
+                    triggered=isinstance(result, SignalProposal),
+                    trigger_signal_id=signal_id,
+                    settings=self.settings,
+                    now=now,
+                )
+            except Exception as exc:  # noqa: BLE001 - observability must never kill the cycle
+                logger.warning("opportunity tracking failed for %s: %s", signal_id, exc)
 
     def run(self, symbol: str, timeframe: str | None = None) -> SignalProposal | Rejection:
         return self.run_full(symbol, timeframe)[0]

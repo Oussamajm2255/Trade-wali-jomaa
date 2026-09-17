@@ -179,6 +179,10 @@ class SignalRecord(Base):
     decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     no_trade_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     proposal_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Phase E (V-MONSTER §40): the clustered opportunity this cycle
+    # belongs to, and its lifecycle state at decision time.
+    opportunity_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    opportunity_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Outcome fields (filled by the outcome engine when the trade resolves).
     outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
     r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -188,3 +192,22 @@ class SignalRecord(Base):
         from sqlalchemy import inspect
 
         return {c.key: getattr(self, c.key) for c in inspect(self).mapper.column_attrs}
+
+
+class Opportunity(Base):
+    """One clustered opportunity (V-MONSTER §31/§40): OPPORTUNITY_ID =
+    direction + structure event + time proximity. Lifecycle states
+    FORMING -> TRIGGERED -> EXPIRED, tracked for forensics and the
+    dedup gate (§52/§53) — never a gate by itself."""
+
+    __tablename__ = "opportunities"
+
+    opportunity_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(8))
+    side: Mapped[str] = mapped_column(String(8))
+    anchor: Mapped[str] = mapped_column(String(96))
+    state: Mapped[str] = mapped_column(String(16), index=True)
+    first_seen_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    trigger_signal_id: Mapped[str | None] = mapped_column(String(24), nullable=True)

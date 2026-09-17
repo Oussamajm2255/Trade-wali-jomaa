@@ -69,7 +69,7 @@ def _cost_gate(gates) -> dict | None:
 
 def test_kill_switch_skips_ai(monkeypatch):
     orch = make_orchestrator(risk=_HaltedRisk())
-    result, verdicts, entry, gauge, snap, _, gates = _run(orch, monkeypatch, _FakeSnap())
+    result, verdicts, entry, gauge, snap, _, gates, _opp = _run(orch, monkeypatch, _FakeSnap())
     assert isinstance(result, Rejection)
     assert "kill-switch" in result.reason
     assert verdicts == {}  # zero AI outputs — nothing was called
@@ -84,7 +84,7 @@ def test_kill_switch_skips_ai(monkeypatch):
 def test_zero_price_skips_ai(monkeypatch):
     orch = make_orchestrator()
     snap = _FakeSnap(entry={"last_close": 0.0, "atr_14": 12.5})
-    result, verdicts, _, _, _, _, gates = _run(orch, monkeypatch, snap)
+    result, verdicts, _, _, _, _, gates, _ = _run(orch, monkeypatch, snap)
     assert isinstance(result, Rejection)
     assert "price" in result.reason
     assert verdicts == {}
@@ -94,7 +94,7 @@ def test_zero_price_skips_ai(monkeypatch):
 def test_zero_atr_skips_ai(monkeypatch):
     orch = make_orchestrator()
     snap = _FakeSnap(entry={"last_close": 4350.0, "atr_14": 0.0})
-    result, verdicts, _, _, _, _, gates = _run(orch, monkeypatch, snap)
+    result, verdicts, _, _, _, _, gates, _ = _run(orch, monkeypatch, snap)
     assert isinstance(result, Rejection)
     assert "ATR" in result.reason
     assert verdicts == {}
@@ -107,7 +107,7 @@ def test_zero_atr_skips_ai(monkeypatch):
 def test_spread_over_ceiling_skips_ai(monkeypatch):
     orch = make_orchestrator(ai_skip_max_spread_pct=0.05)
     snap = _FakeSnap(dxy={"value": 60, "spread": 3.0})  # 3/4350 = 0.069% > 0.05
-    result, verdicts, _, _, _, _, gates = _run(orch, monkeypatch, snap)
+    result, verdicts, _, _, _, _, gates, _ = _run(orch, monkeypatch, snap)
     assert isinstance(result, Rejection)
     assert "spread" in result.reason and "0.0690" in result.reason
     assert verdicts == {}
@@ -117,7 +117,7 @@ def test_spread_over_ceiling_skips_ai(monkeypatch):
 def test_spread_within_ceiling_passes(monkeypatch):
     orch = make_orchestrator(ai_skip_max_spread_pct=0.05)
     snap = _FakeSnap(dxy={"value": 60, "spread": 1.0})  # 0.023% < 0.05
-    result, verdicts, _, _, _, _, gates = _run(orch, monkeypatch, snap, agents_result={})
+    result, verdicts, _, _, _, _, gates, _ = _run(orch, monkeypatch, snap, agents_result={})
     assert _cost_gate(gates) == {"gate": "cost_control", "status": "pass"}
     # agents ran (and all failed) — the skip never fired.
     assert isinstance(result, Rejection)
@@ -127,7 +127,7 @@ def test_spread_within_ceiling_passes(monkeypatch):
 def test_ceiling_zero_disables_spread_check(monkeypatch):
     orch = make_orchestrator()  # default ai_skip_max_spread_pct = 0.0
     snap = _FakeSnap(dxy={"value": 60, "spread": 50.0})
-    result, _, _, _, _, _, gates = _run(orch, monkeypatch, snap, agents_result={})
+    result, _, _, _, _, _, gates, _ = _run(orch, monkeypatch, snap, agents_result={})
     assert _cost_gate(gates)["status"] == "pass"
     assert isinstance(result, Rejection)  # blocked later, not by spread
 
@@ -137,7 +137,7 @@ def test_ceiling_zero_disables_spread_check(monkeypatch):
 
 def test_clean_market_appends_pass_gate(monkeypatch):
     orch = make_orchestrator(risk=_CleanRisk())
-    result, _, _, _, _, _, gates = _run(orch, monkeypatch, _FakeSnap(), agents_result={})
+    result, _, _, _, _, _, gates, _ = _run(orch, monkeypatch, _FakeSnap(), agents_result={})
     assert _cost_gate(gates) == {"gate": "cost_control", "status": "pass"}
     assert isinstance(result, Rejection)  # all-agents-failed stub, gate passed
 
@@ -151,7 +151,7 @@ def test_helper_returns_none_when_risk_is_none(monkeypatch):
 def test_gate_trail_keeps_market_and_data_quality_passes(monkeypatch):
     orch = make_orchestrator(ai_skip_max_spread_pct=0.05)
     snap = _FakeSnap(dxy={"value": 60, "spread": 3.0})
-    _, _, _, _, _, _, gates = _run(orch, monkeypatch, snap)
+    _, _, _, _, _, _, gates, _ = _run(orch, monkeypatch, snap)
     trail = [g["gate"] for g in gates]
     assert trail == ["market_data", "data_quality", "cost_control"]
     assert gates[0]["status"] == "pass"
