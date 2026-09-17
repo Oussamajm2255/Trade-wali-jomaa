@@ -153,16 +153,32 @@ push gate. No V2 behaviour changes without a test proving parity.
   realistic distances (chase-only monotonic series correctly trades 0,
   documented by a dedicated test).
 
-### Phase D — Market speed + displacement/trigger quality (§10, §27, §30)
+### Phase D — Market speed + displacement/trigger quality (§10, §27, §30) — ✅ DELIVERED
 - `data/speed.py` (new): SLOW/NORMAL/FAST/EXTREME from range-per-minute
-  vs ATR, candle formation speed, volatility acceleration.
-- `structure.py`: DISPLACEMENT_QUALITY 0-1 (range/ATR, body ratio,
-  consecutive candles, BOS/FVG follow-through).
-- `fusion/trigger.py` (new): TRIGGER_QUALITY vs TRIGGER_SPEED; trigger
-  confirmed/not state.
-- Speed feeds actionability limits (max chase) and rejection when EXTREME
-  (new NoTradeReason ABNORMAL_SPEED).
-- Tests: speed classes, displacement scoring, trigger separation.
+  vs ATR, candle formation speed (typical-range fraction consumed,
+  normalized by elapsed candle time with a 0.5 floor so a fresh
+  candle's first ticks never score more than 2x), and volatility
+  acceleration (ATR now vs `accel_lookback` ago). EXTREME = ratio >=
+  `extreme_mult` or FAST ratio + acceleration lift; SLOW = formation
+  <= `slow_mult` with ATR not expanding; insufficient history fails
+  open to NORMAL (unknown, not fast).
+- `structure.py`: DISPLACEMENT_QUALITY 0-1 on the latest displacement
+  candle (0.35 range/ATR, 0.25 body ratio, 0.2 consecutive candles,
+  0.2 BOS/FVG follow-through); None when no displacement exists
+  (honest, never fabricated).
+- `fusion/trigger.py` (new): TRIGGER_QUALITY (0-1 mean of BOS support,
+  sweep/reclaim, displacement, zone shelter) with TRIGGER_SPEED kept
+  separate; `confirmed = quality >= trigger_confirm_min and speed !=
+  EXTREME`. Side-aware, computed in `build_fusion_context` and riding
+  `FusionContext.trigger` into signal records + Telegram.
+- `risk/engine.py`: opt-in `no_trade_extreme_speed` gate — EXTREME
+  speed rejects new entries with the new NoTradeReason ABNORMAL_SPEED
+  (mirrors HIGH_VOLATILITY); the gate trail always records the state.
+- `notify/telegram.py`: Vitesse (state + ratio) and Déclencheur
+  (confirmé / non confirmé) lines in both formats.
+- Tests: speed classes/formation/acceleration/honesty (9), trigger
+  separation/confirmation (8), displacement scoring (3), engine gate
+  (3), snapshot wiring (1).
 
 ### Phase E — Opportunity clustering + signal dedup/suppression (§31, §40, §41, §52, §53, §79)
 - `store/opportunity.py` (new): OPPORTUNITY_ID grouping by direction +
@@ -254,7 +270,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   calculations vectorized over the cached snapshot; no per-tick work
   beyond Phase I supervision (cheap state checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 442 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 466 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -281,9 +297,9 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase C — location quality
-  + room-to-target are live. Its confidence scores have no calibration
-  guarantee yet; Phases K/L
+- **Current frontier**: the live bot is at Phase D — market speed +
+  displacement/trigger quality are live. Its confidence scores have no
+  calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
   is marked unavailable in Telegram with the reason — it is never

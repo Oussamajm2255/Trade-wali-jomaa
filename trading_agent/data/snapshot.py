@@ -40,6 +40,7 @@ from trading_agent.data.sessions import (
     session_state,
 )
 from trading_agent.data.shock import detect_shock
+from trading_agent.data.speed import compute_market_speed
 from trading_agent.data.structure import detect_structure
 from trading_agent.data.vwap import compute_vwap
 from trading_agent.versioning import version_stamp
@@ -77,6 +78,10 @@ class MarketSnapshot(BaseModel):
     # anchors, both built from the snapshot's own candles.
     liquidity: dict = Field(default_factory=dict)
     vwap: dict = Field(default_factory=dict)
+    # Phase D (V-MONSTER §27): deterministic market speed
+    # (SLOW/NORMAL/FAST/EXTREME); the side-aware trigger quality (§30)
+    # lives in the fusion context instead.
+    speed: dict = Field(default_factory=dict)
     data_quality: DataQuality = Field(default_factory=DataQuality)
     versions: dict = Field(default_factory=dict)
     # Phase A (V-MONSTER §5): latency/age metrics for one cycle — how
@@ -134,6 +139,7 @@ class MarketSnapshot(BaseModel):
         snap["shock_context"] = self.shock_context
         snap["liquidity"] = self.liquidity
         snap["vwap"] = self.vwap
+        snap["speed"] = self.speed
         return snap
 
     def context_for_risk(self) -> dict:
@@ -153,6 +159,7 @@ class MarketSnapshot(BaseModel):
             "shock_context": self.shock_context,
             "liquidity": self.liquidity,
             "vwap": self.vwap,
+            "speed": self.speed,
             "versions": self.versions,
         }
 
@@ -401,6 +408,24 @@ def build_market_snapshot(
         )
     except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
         logger.warning("vwap failed: %s", exc)
+
+    # Phase D (V-MONSTER §27): market speed from the entry frame,
+    # anchored to the cycle time (wall clock live, replay time in
+    # backtests) so the formation ratio reflects the real candle.
+    try:
+        snap.speed = compute_market_speed(
+            snap.candles[entry_tf],
+            timeframe=entry_tf,
+            window=settings.speed_window,
+            fast_mult=settings.speed_fast_mult,
+            extreme_mult=settings.speed_extreme_mult,
+            slow_mult=settings.speed_slow_mult,
+            accel_lookback=settings.speed_accel_lookback,
+            accel_extreme_mult=settings.speed_accel_extreme_mult,
+            now=now or snap.timestamp,
+        )
+    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+        logger.warning("market speed failed: %s", exc)
 
     snap.data_quality = combine_quality(*qualities)
     logger.info(

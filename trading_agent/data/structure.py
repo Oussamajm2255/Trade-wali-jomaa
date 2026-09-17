@@ -74,6 +74,7 @@ def detect_structure(
     displacement_atr_mult: float = 1.5,
     sweep_lookback: int = 30,
     timeframe: str = "15m",
+    follow_window: int = 3,
 ) -> dict:
     """One deterministic pass over the frame: every structure/SMC feature."""
     sh, sl = swing_points(df, left, right)
@@ -198,6 +199,77 @@ def detect_structure(
     support = sorted({s["price"] for s in swings if s["type"] == "SWING_LOW"})[-3:]
     resistance = sorted({s["price"] for s in swings if s["type"] == "SWING_HIGH"})[-3:]
 
+    # DISPLACEMENT_QUALITY (V-MONSTER §10, Phase D): the most recent
+    # displacement candle scored on four axes — range vs ATR, body
+    # ratio, consecutive displacement candles and BOS/FVG follow-through.
+    # None when no displacement candle exists (honest, never fabricated).
+    displacement_quality = None
+    if displacements:
+        disp = displacements[-1]
+        i = disp["candle_index"]
+        rng = disp["range"]
+        # Range vs ATR: the displacement threshold (1.5x) scores 0.5;
+        # double the threshold saturates at 1.0.
+        range_score = (
+            min(1.0, (rng / atr_now) / (displacement_atr_mult * 2.0))
+            if atr_now > 0
+            else 0.5
+        )
+        body = abs(float(df["close"].iloc[i]) - float(df["open"].iloc[i]))
+        body_ratio = body / rng if rng > 0 else 0.0
+        if body_ratio >= 0.7:
+            body_score = 1.0
+        elif body_ratio >= 0.5:
+            body_score = 0.7
+        elif body_ratio >= 0.3:
+            body_score = 0.4
+        else:
+            body_score = 0.2
+        # Consecutive same-direction displacement candles ending here.
+        bullish = disp["direction"] == "bullish"
+        consecutive = 1
+        j = i - 1
+        while j >= 0:
+            rng_j = float(df["high"].iloc[j] - df["low"].iloc[j])
+            if rng_j < disp_threshold:
+                break
+            if bool(df["close"].iloc[j] >= df["open"].iloc[j]) != bullish:
+                break
+            consecutive += 1
+            j -= 1
+        consecutive_score = 1.0 if consecutive >= 3 else 0.7 if consecutive == 2 else 0.3
+        # Follow-through: same-direction BOS or FVG shortly after.
+        follow_score = 0.3
+        for e in bos + fvgs:
+            same_dir = (
+                bullish
+                and e["type"] in ("BOS_BULLISH", "FVG_BULLISH")
+                or not bullish
+                and e["type"] in ("BOS_BEARISH", "FVG_BEARISH")
+            )
+            if same_dir and 0 < e["candle_index"] - i <= follow_window:
+                follow_score = 1.0
+                break
+        quality = round(
+            0.35 * range_score
+            + 0.25 * body_score
+            + 0.2 * consecutive_score
+            + 0.2 * follow_score,
+            4,
+        )
+        disp["quality"] = quality
+        displacement_quality = {
+            "quality": quality,
+            "candle_index": i,
+            "direction": disp["direction"],
+            "components": {
+                "range": round(range_score, 4),
+                "body": round(body_score, 4),
+                "consecutive": round(consecutive_score, 4),
+                "follow_through": round(follow_score, 4),
+            },
+        }
+
     return {
         "timeframe": timeframe,
         "swings": swings[-20:],
@@ -209,6 +281,7 @@ def detect_structure(
         "fvgs": fvgs[-5:],
         "displacements": displacements[-5:],
         "order_blocks": order_blocks[-5:],
+        "displacement_quality": displacement_quality,
         "support": support,
         "resistance": resistance,
     }

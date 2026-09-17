@@ -188,6 +188,28 @@ class Settings(BaseSettings):
     room_gate_enabled: bool = True
     room_min_rr: float = 1.0
 
+    # --- Market speed (V-MONSTER §27, Phase D) ---
+    # Deterministic SLOW/NORMAL/FAST/EXTREME classification from
+    # range-per-minute vs ATR, candle formation speed and volatility
+    # acceleration. EXTREME refuses new entries only when opted in
+    # (no_trade_extreme_speed) with ABNORMAL_SPEED.
+    speed_window: int = 12  # baseline candles (current excluded)
+    speed_fast_mult: float = 1.8  # range/formation ratio -> FAST
+    speed_extreme_mult: float = 3.0  # ratio -> EXTREME
+    speed_slow_mult: float = 0.4  # ratio <= this, not accelerating -> SLOW
+    speed_accel_lookback: int = 12  # ATR acceleration window (candles)
+    speed_accel_extreme_mult: float = 1.5  # accel on top of FAST -> EXTREME
+    no_trade_extreme_speed: bool = False
+
+    # --- Trigger quality (V-MONSTER §30, Phase D) ---
+    # TRIGGER_QUALITY (0-1, BOS/sweep/displacement/zone shelter) is
+    # computed in the fusion layer and stored with every signal; the
+    # TRIGGER_SPEED state is kept separate. A trigger below
+    # trigger_confirm_min, or one firing in EXTREME speed, is recorded
+    # as not confirmed — enrichment, never a hard gate by itself.
+    trigger_confirm_min: float = 0.6
+    trigger_event_window: int = 12  # recency window for structure events
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.

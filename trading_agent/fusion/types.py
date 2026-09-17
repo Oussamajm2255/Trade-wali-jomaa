@@ -37,6 +37,7 @@ class NoTradeReason(StrEnum):
     STRUCTURE_CONFLICT = "STRUCTURE_CONFLICT"
     HIGH_VOLATILITY = "HIGH_VOLATILITY"
     BAD_SPREAD = "BAD_SPREAD"
+    ABNORMAL_SPEED = "ABNORMAL_SPEED"
     INSUFFICIENT_ROOM = "INSUFFICIENT_ROOM"
     NEWS_RISK = "NEWS_RISK"
     SHOCK = "SHOCK"
@@ -108,3 +109,7 @@ class FusionContext(BaseModel):
     # Deterministic labels for the no-trade gates (§20).
     regime: str | None = None  # deterministic regime engine label
     spread_pct: float | None = None  # broker/gauge spread when known
+    # Phase D (V-MONSTER §30): TRIGGER_QUALITY vs TRIGGER_SPEED,
+    # computed per side in build_fusion_context and stored with every
+    # signal record.
+    trigger: dict = Field(default_factory=dict)

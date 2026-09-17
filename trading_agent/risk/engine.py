@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from trading_agent.config import Settings
 from trading_agent.data.calendar import blocking_events
 from trading_agent.data.shock import ShockState
+from trading_agent.data.speed import SpeedState
 from trading_agent.fusion.room import compute_room
 from trading_agent.fusion.types import ConflictState, FusionContext, NoTradeReason
 from trading_agent.schema.types import AgentVerdict, Rejection, Side, SignalProposal
@@ -270,6 +271,21 @@ class RiskEngine:
                 mark("room", "reject", room.reason)
                 return room
             mark("room", "pass")
+
+            # --- Market speed gate (V-MONSTER §27, Phase D), opt-in. ---
+            # EXTREME speed refuses new entries when enabled
+            # (ABNORMAL_SPEED); the trail always records the state.
+            speed = (context or {}).get("speed") or {}
+            speed_state = speed.get("state") or SpeedState.NORMAL
+            if self.s.no_trade_extreme_speed and speed_state == SpeedState.EXTREME:
+                detail = speed.get("detail") or "extreme market speed"
+                mark("speed", "reject", detail)
+                return Rejection(
+                    symbol=symbol,
+                    reason=f"extreme market speed: {detail}",
+                    no_trade_reason=NoTradeReason.ABNORMAL_SPEED.value,
+                )
+            mark("speed", "pass", speed.get("detail") or "speed unknown")
 
             # --- Statistical quality gate (spec §32), opt-in. ---
             # Pipeline order (spec): AI SIGNAL -> SETUP QUALITY ->

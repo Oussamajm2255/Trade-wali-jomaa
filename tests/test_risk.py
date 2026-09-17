@@ -236,6 +236,53 @@ def test_bad_spread_no_trade(seeded) -> None:
     assert result.no_trade_reason == NoTradeReason.BAD_SPREAD.value
 
 
+# --- Phase D (V-MONSTER §27): market-speed gate, opt-in. ---
+
+
+def test_extreme_speed_no_trade_is_opt_in(seeded) -> None:
+    engine = RiskEngine(seeded)
+    ctx = {"speed": {"state": "EXTREME", "detail": "formation 3.4x"}}
+    # Off by default: proposal passes.
+    assert isinstance(
+        engine.evaluate("XAUUSD", "15m", Side.LONG, 0.8, 2000.0, 10.0, verdicts(), None, None, ctx),
+        SignalProposal,
+    )
+    seeded.no_trade_extreme_speed = True
+    trail: list[dict] = []
+    result = engine.evaluate(
+        "XAUUSD", "15m", Side.LONG, 0.8, 2000.0, 10.0, verdicts(), None, None, ctx, trail=trail
+    )
+    assert isinstance(result, Rejection)
+    assert result.no_trade_reason == NoTradeReason.ABNORMAL_SPEED.value
+    assert "extreme market speed" in result.reason
+    assert {"gate": "speed", "status": "reject", "detail": "formation 3.4x"} in trail
+
+
+def test_non_extreme_speed_never_blocks(seeded) -> None:
+    seeded.no_trade_extreme_speed = True
+    engine = RiskEngine(seeded)
+    for state in ("SLOW", "NORMAL", "FAST"):
+        result = engine.evaluate(
+            "XAUUSD", "15m", Side.LONG, 0.8, 2000.0, 10.0, verdicts(), None, None,
+            {"speed": {"state": state, "detail": f"speed {state}"}},
+        )
+        assert isinstance(result, SignalProposal), state
+
+
+def test_speed_trail_records_state(seeded) -> None:
+    engine = RiskEngine(seeded)
+    trail: list[dict] = []
+    result = engine.evaluate(
+        "XAUUSD", "15m", Side.LONG, 0.8, 2000.0, 10.0, verdicts(), None, None,
+        {"speed": {"state": "FAST", "detail": "formation 2.1x"}},
+        trail=trail,
+    )
+    assert isinstance(result, SignalProposal)
+    assert [t for t in trail if t["gate"] == "speed"] == [
+        {"gate": "speed", "status": "pass", "detail": "formation 2.1x"}
+    ]
+
+
 def test_statistical_edge_unknown_no_trade(seeded) -> None:
     seeded.require_statistical_edge = True
     engine = RiskEngine(seeded)

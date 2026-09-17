@@ -47,6 +47,12 @@ _VWAP_STATE_LABELS = {
     "above": "au-dessus du VWAP",
     "below": "sous le VWAP",
 }
+_SPEED_LABELS = {
+    "SLOW": "Lente",
+    "NORMAL": "Normale",
+    "FAST": "Rapide",
+    "EXTREME": "Extrême",
+}
 
 
 def agent_bias(payload: dict) -> str | None:
@@ -202,6 +208,7 @@ class TelegramNotifier:
         if contribution.invalidation:
             lines.append("Invalidation : " + contribution.invalidation)
         lines.extend(self._liquidity_vwap_lines(snap))
+        lines.extend(self._speed_trigger_lines(snap, record))
 
         trail = []
         for gate in gates:
@@ -338,6 +345,7 @@ class TelegramNotifier:
         if contribution.contradicting:
             lines.append("Contredit : " + " · ".join(contribution.contradicting))
         lines.extend(self._liquidity_vwap_lines(snap))
+        lines.extend(self._speed_trigger_lines(snap, record))
 
         trail = []
         for gate in gates:
@@ -395,6 +403,25 @@ class TelegramNotifier:
             if liq.get("quality") is not None:
                 parts.append(f"qualité {float(liq['quality']):.2f}")
             lines.append(" | ".join(parts))
+        return lines
+
+    def _speed_trigger_lines(self, snap: dict, record: dict) -> list[str]:
+        """Phase D (V-MONSTER §27/§30): market speed + trigger state."""
+        lines: list[str] = []
+        speed = snap.get("speed") or {}
+        if speed.get("state"):
+            suffix = (
+                f" ({speed['range_ratio']}x ATR)"
+                if speed.get("range_ratio") is not None
+                else ""
+            )
+            lines.append(
+                "Vitesse : " + _SPEED_LABELS.get(speed["state"], speed["state"]) + suffix
+            )
+        trigger = (record.get("fusion") or {}).get("trigger") or {}
+        if trigger.get("quality") is not None:
+            state = "confirmé" if trigger.get("confirmed") else "non confirmé"
+            lines.append(f"Déclencheur : {float(trigger['quality']):.2f} ({state})")
         return lines
 
     def _trace_lines(self, record: dict) -> list[str]:

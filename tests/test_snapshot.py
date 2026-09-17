@@ -141,6 +141,26 @@ def test_snapshot_carries_phase_b_liquidity_and_vwap() -> None:
     assert ctx["vwap"] is snap.vwap
 
 
+def test_snapshot_carries_phase_d_speed() -> None:
+    snap = build_market_snapshot(FakeMarket(gauge=fresh_gauge()), "XAUUSD", make_settings(), "15m")
+    assert snap.speed["state"] in ("SLOW", "NORMAL", "FAST", "EXTREME")
+    assert snap.speed["insufficient_history"] is False
+    assert snap.speed["range_per_minute"] > 0
+    assert snap.speed["formation_ratio"] is not None
+    entry = snap.entry_snapshot_for_llm()
+    assert entry["speed"] is snap.speed
+    ctx = snap.context_for_risk()
+    assert ctx["speed"] is snap.speed
+    # Deterministic NORMAL classification on a uniform frame: anchor the
+    # snapshot clock so the in-progress candle fraction is fixed (14/15).
+    now = pd.Timestamp.now(tz="UTC").floor("15min") + pd.Timedelta("14min")
+    snap2 = build_market_snapshot(
+        FakeMarket(gauge=fresh_gauge()), "XAUUSD", make_settings(), "15m", now=now
+    )
+    assert snap2.speed["state"] == "NORMAL"
+    assert snap2.speed["formation_ratio"] == pytest.approx(1.0, rel=0.1)
+
+
 def test_proxy_source_marks_vwap_unavailable() -> None:
     snap = build_market_snapshot(
         FakeMarket(gauge=fresh_gauge(), source="PAXG/USDT proxy (futures closed)"),

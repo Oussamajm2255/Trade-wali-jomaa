@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from trading_agent.data.structure import detect_structure
 
@@ -147,6 +148,53 @@ def test_displacement_and_order_block() -> None:
     ob = next(e for e in r["order_blocks"] if e["direction"] == "bullish")
     assert ob["candle_index"] == 39
     assert ob["status"] == "untested"
+
+
+def test_displacement_quality_scored_with_follow_through() -> None:
+    df = flat_frame(60)
+    # Candle 55: a strong bullish displacement (range 5, body 4/5).
+    df.iloc[55, df.columns.get_loc("open")] = 2398.0
+    df.iloc[55, df.columns.get_loc("close")] = 2402.0
+    df.iloc[55, df.columns.get_loc("high")] = 2402.5
+    df.iloc[55, df.columns.get_loc("low")] = 2397.5
+    # Candle 57 gaps above candle 55's high: same-direction FVG inside
+    # the follow window.
+    df.iloc[57, df.columns.get_loc("open")] = 2404.0
+    df.iloc[57, df.columns.get_loc("close")] = 2404.2
+    df.iloc[57, df.columns.get_loc("high")] = 2404.5
+    df.iloc[57, df.columns.get_loc("low")] = 2403.5
+    r = detect_structure(df)
+    dq = r["displacement_quality"]
+    assert dq is not None
+    assert dq["direction"] == "bullish"
+    assert dq["candle_index"] == 55
+    # ATR also absorbs the FVG gap candle's true range, so 5/ATR lands
+    # just under the 2x saturation threshold — honest, not 1.0.
+    assert dq["components"]["range"] == pytest.approx(0.95, abs=0.05)
+    assert dq["components"]["body"] == 1.0  # body ratio 0.8 >= 0.7
+    assert dq["components"]["consecutive"] == 0.3  # single candle
+    assert dq["components"]["follow_through"] == 1.0  # FVG 2 candles later
+    assert dq["quality"] == pytest.approx(0.84, abs=0.02)
+    # The displacement entry itself carries the score.
+    disp = next(e for e in r["displacements"] if e["candle_index"] == 55)
+    assert disp["quality"] == dq["quality"]
+
+
+def test_displacement_quality_consecutive_candles() -> None:
+    df = flat_frame(60)
+    for i in (58, 59):
+        df.iloc[i, df.columns.get_loc("open")] = 2398.0
+        df.iloc[i, df.columns.get_loc("close")] = 2402.0
+        df.iloc[i, df.columns.get_loc("high")] = 2402.5
+        df.iloc[i, df.columns.get_loc("low")] = 2397.5
+    r = detect_structure(df)
+    dq = r["displacement_quality"]
+    assert dq["candle_index"] == 59
+    assert dq["components"]["consecutive"] == 0.7  # two in a row
+
+
+def test_displacement_quality_none_without_displacement() -> None:
+    assert detect_structure(flat_frame(60))["displacement_quality"] is None
 
 
 def test_support_resistance_from_swings() -> None:
