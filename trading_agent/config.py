@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     mt5_deviation_points: int = 20
     mt5_dxy_symbol: str = "DXY_U6"  # Dollar Index CFD on the user's IC Markets MT5
 
+    # --- MT5 data bridge (broker feed into the Python pipeline) ---
+    # XAUUSD candles come from the connected terminal first: real prices,
+    # spread and tick volume from the trader's own broker. The public
+    # yfinance -> PAXG chain stays as the automatic fallback (Railway/
+    # Linux runs with no terminal at all). PREFER_MT5_GOLD_DATA=false is
+    # the data kill-switch back to the public chain even when connected.
+    prefer_mt5_gold_data: bool = True
+    # Paper mode can also analyse on broker data (Windows): requires MT5
+    # credentials + a running terminal; execution stays simulated.
+    mt5_data_enabled: bool = False
+
     # --- DXY concurrency filter (gold) ---
     # The hard rule at the heart of the strategy: the robot only signals
     # LONG gold when the dollar is weak (gauge high) and SHORT gold when
@@ -276,6 +287,15 @@ class Settings(BaseSettings):
     # latency feeds the Phase G reaction window.
     supervision_enabled: bool = True
     user_latency_ema_span: int = 10  # EMA window for the reaction model
+
+    # --- Post-signal forensics (V-MONSTER §65/§67, Phase J) ---
+    # After every decision (proposal OR rejection) the market is sampled
+    # at 1/3/5/10/30 minutes and stored, so any verdict can be audited
+    # against how the setup actually aged. Rejected setups are then
+    # classified CORRECT/WRONG/INCONCLUSIVE against their realized 30m
+    # move: moves under this threshold are noise, not signal.
+    forensics_enabled: bool = True
+    rejection_move_threshold_pct: float = 0.05  # % move for WRONG_REJECT
 
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic

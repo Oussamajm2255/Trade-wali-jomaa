@@ -201,6 +201,8 @@ def test_render_html_escapes_markup():
         "rejection_reasons": [],
         "breakdowns": {},
         "recent_signals": [],
+        "rejection_quality": {"correct": 0, "wrong": 0, "inconclusive": 0,
+                               "resolved": 0, "correct_rate": None},
     }
     html_text = render_html(data)
     assert "<b>X</b>" not in html_text

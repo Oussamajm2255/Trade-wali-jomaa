@@ -8,7 +8,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -225,3 +235,23 @@ class Opportunity(Base):
     first_seen_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     trigger_signal_id: Mapped[str | None] = mapped_column(String(24), nullable=True)
+
+
+class PostSnapshot(Base):
+    """Post-signal forensics snapshot (V-MONSTER §65): the market at
+    fixed offsets (1/3/5/10/30 min) after a decision, for BOTH proposals
+    and rejections — how the setup aged after the robot's verdict.
+    One row per (signal_id, offset_min)."""
+
+    __tablename__ = "post_snapshots"
+    __table_args__ = (
+        UniqueConstraint("signal_id", "offset_min", name="uq_post_signal_offset"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[str] = mapped_column(String(24), index=True)
+    offset_min: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    price: Mapped[float]
+    high: Mapped[float]
+    low: Mapped[float]

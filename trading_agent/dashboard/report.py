@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from trading_agent.analytics.rejected import rejection_quality
 from trading_agent.analytics.stats import (
     _CONFIDENCE_BUCKETS,
     breakdown,
@@ -24,6 +25,7 @@ from trading_agent.analytics.stats import (
     confidence_buckets,
     resolved_signals,
 )
+from trading_agent.store import actions
 from trading_agent.store.models import Position, SignalRecord
 from trading_agent.versioning import version_stamp
 
@@ -123,6 +125,13 @@ def collect(session: Session, limit: int = 5000) -> dict:
     actionable_denom = proposals_today + too_late_today
     actionable_rate = (
         round(proposals_today / actionable_denom, 4) if actionable_denom else None
+    )
+
+    # Rejection quality (V-MONSTER §67): did we refuse correctly? Every
+    # rejection with a directional score and a 30m post snapshot is
+    # classified against the realized move in the would-be direction.
+    rej_quality = rejection_quality(
+        actions.rejection_outcomes(limit=limit, session=session)
     )
 
     overall = compute_trade_stats([(r.outcome, r.r_multiple) for r in resolved])
@@ -237,6 +246,7 @@ def collect(session: Session, limit: int = 5000) -> dict:
         "rejection_reasons": rejection_reasons,
         "breakdowns": dims,
         "recent_signals": recent_signals,
+        "rejection_quality": rej_quality,
     }
 
 
@@ -360,6 +370,23 @@ def render_html(data: dict) -> str:
         )
     )
 
+    # Rejection quality (V-MONSTER §67): the honest ratio over decided
+    # cases only — the inconclusive band never inflates it (spec §36).
+    rej_quality = data.get("rejection_quality", {})
+    rej_rate = rej_quality.get("correct_rate")
+    rej_cards = "".join(
+        f"<div class='card'><div class='v'>{v}</div><div class='k'>{_esc(k)}</div></div>"
+        for k, v in (
+            ("Bons rejets (30 min)", rej_quality.get("correct", 0)),
+            ("Mauvais rejets (30 min)", rej_quality.get("wrong", 0)),
+            ("Non concluants", rej_quality.get("inconclusive", 0)),
+            (
+                "Taux de bons rejets",
+                f"{rej_rate * 100:.1f}%" if rej_rate is not None else "—",
+            ),
+        )
+    )
+
     perf_rows = [
         ["Trades résolus", overall["trades"]],
         ["Taux de réussite", _f(overall["win_rate"])],
@@ -440,6 +467,11 @@ décision : {_esc(c['decision'])}</div>
 
 <h2>Aujourd'hui</h2>
 <div class="cards">{today_cards}</div>
+
+<h2>Qualité des rejets — 30 min après (§67)</h2>
+<div class="cards">{rej_cards}</div>
+<div class="note">rejets classés contre le mouvement réalisé dans la direction
+refusée (seuil 0,05 %) ; le taux exclut les non concluants (§36).</div>
 
 <h2>Performance globale</h2>
 {_stat_table(["Métrique", "Valeur"], perf_rows)}

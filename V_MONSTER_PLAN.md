@@ -314,13 +314,39 @@ push gate. No V2 behaviour changes without a test proving parity.
   timing override (2), orchestrator stamping + EMA feed (2), Telegram
   follow-up lines (2).
 
-### Phase J — Forensics + counterfactual timing + rejected-setup outcomes (§65, §66, §67)
-- Post-signal snapshots at 1m/3m/5m/10m/30m (from loop, stored).
-- Counterfactual timing analysis (research-only, `analytics/`): what-if
-  T±3/5/10s entries from M1 data where available.
-- Rejected setups: track expected direction vs realized N-candle outcome;
-  rejection-quality stats (did we reject correctly?) in dashboard.
-- Tests: snapshot persistence, counterfactual pure-function cases.
+### Phase J — Forensics + counterfactual timing + rejected-setup outcomes (§65, §66, §67) ✅ DELIVERED
+- `store/models.py`: `PostSnapshot` table (signal_id, offset_min, ts,
+  price, high, low; unique (signal_id, offset_min)) — a new table, so
+  `create_all` creates it on existing databases (no additive column
+  migration needed).
+- `forensics.py` (new): `SnapshotRegistry` + `capture_due` — every
+  decision (proposal OR rejection) registers its signal_id + ts and
+  the loop samples the current candle at 1/3/5/10/30 min, persisting
+  one row per offset. `due()` is purely observational and `mark()`
+  confirms persistence, so a tick for another symbol never eats an
+  owed capture; fully-captured or >32-min-old entries are pruned.
+  Restarts re-register the last 31 minutes of decisions (`restore()`),
+  and an already-persisted row is marked, never re-inserted.
+- `analytics/counterfactual.py` (new, research-only): what-if entries
+  at T±10/±5/±3/0 s from the M1 OHLCV — linear open→close
+  interpolation inside the bar containing the shifted timestamp
+  (`linear_interpolation_m1`, a labeled approximation, never
+  tick-accurate); data gaps return available=False. `counterfactual_rr`
+  shifts only the entry (stop/target stay plan-based) and returns None
+  when the shifted entry crosses the stop.
+- `analytics/rejected.py` (new): every rejection with a directional
+  score and a 30m snapshot is classified CORRECT_REJECT (the market
+  moved against the refused direction) / WRONG_REJECT (moved at least
+  `rejection_move_threshold_pct`, a percent) / INCONCLUSIVE (the noise
+  band); `rejection_quality` reports correct/(correct+wrong) — the
+  inconclusive band never inflates it (spec §36). Dashboard section
+  “Qualité des rejets — 30 min après (§67)” with correct/wrong/
+  inconclusive cards + the honest ratio.
+- Config: `forensics_enabled` (loop gate) and
+  `rejection_move_threshold_pct` (0.05).
+- Tests: registry due/mark/prune/restore + symbol-filtered capture +
+  idempotent persistence (16), counterfactual interpolation/gaps/RR
+  (10), rejection classification/aggregation/dashboard pipeline (13).
 
 ### Phase K — System health + clock + auto-protection (§76, §77, §78)
 - `ops/health.py` (new): DB health, Telegram delivery success rate,
@@ -358,9 +384,10 @@ push gate. No V2 behaviour changes without a test proving parity.
 
 - Latency: each new engine adds per-cycle compute — keep all new
   calculations vectorized over the cached snapshot; no per-tick work
-  beyond Phase I supervision (cheap state checks).
+  beyond Phase I supervision and Phase J snapshot captures (cheap
+  registry checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 571 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 622 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -387,13 +414,17 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase I — pending proposals
-  are supervised every tick (VALID / DO_NOT_CHASE / INVALIDATED /
-  EXPIRED with change-only Telegram follow-ups), and the EMA of the
-  measured human execution latency feeds the Phase G timing model.
-  Phase H is also live: confidence tiers (HIGH/MEDIUM/LOW from
-  calibrated win rates) gate and size every proposal, and every
-  decision carries an A+/A/NO TRADE label.
+- **Current frontier**: the live bot is at Phase J — every decision
+  (proposal or rejection) now receives post-signal snapshots at
+  1/3/5/10/30 minutes, rejected setups are audited against their
+  realized 30m move (correct/wrong/inconclusive ratio in a new
+  dashboard section), and the counterfactual M1 entry tooling
+  (`analytics/counterfactual.py`) is ready for timing research.
+  Still live from earlier phases: Phase I supervision (VALID /
+  DO_NOT_CHASE / INVALIDATED / EXPIRED with change-only Telegram
+  follow-ups, human-latency EMA feeding the timing model) and
+  Phase H confidence tiers (HIGH/MEDIUM/LOW gating + sizing, A+/A/
+  NO TRADE labels).
   Its confidence scores have no
   calibration guarantee yet; Phases K/L
   are the first point at which scores claim meaning.

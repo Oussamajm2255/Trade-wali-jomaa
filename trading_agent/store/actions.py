@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from trading_agent.schema.types import DecisionState, Side, SignalProposal, utcnow
 from trading_agent.store.db import session_scope
@@ -12,6 +14,7 @@ from trading_agent.store.models import (
     AgentTrack,
     AuditLog,
     Position,
+    PostSnapshot,
     Proposal,
     RiskState,
     SignalRecord,
@@ -165,6 +168,136 @@ def user_latency_ema(span: int = 10, limit: int = 200) -> float | None:
     for s in samples[1:]:
         ema = alpha * s + (1.0 - alpha) * ema
     return round(ema, 3)
+
+
+# ------------------------------------------------- forensics (V-MONSTER §65/§67)
+
+
+def record_post_snapshot(
+    signal_id: str,
+    offset_min: int,
+    price: float,
+    high: float,
+    low: float,
+    now: datetime | None = None,
+) -> bool:
+    """Store one post-signal snapshot; True when it was newly inserted."""
+    now = now or datetime.now(timezone.utc)
+    with session_scope() as session:
+        exists = session.scalars(
+            select(PostSnapshot).where(
+                PostSnapshot.signal_id == signal_id,
+                PostSnapshot.offset_min == offset_min,
+            )
+        ).first()
+        if exists is not None:
+            return False
+        session.add(
+            PostSnapshot(
+                signal_id=signal_id,
+                offset_min=offset_min,
+                ts=now,
+                price=float(price),
+                high=float(high),
+                low=float(low),
+            )
+        )
+        return True
+
+
+def post_snapshots(signal_id: str) -> list[dict]:
+    """The captured post-signal snapshots for one signal (ordered)."""
+    with session_scope() as session:
+        rows = session.scalars(
+            select(PostSnapshot)
+            .where(PostSnapshot.signal_id == signal_id)
+            .order_by(PostSnapshot.offset_min.asc())
+        ).all()
+    return [
+        {
+            "offset_min": r.offset_min,
+            "ts": r.ts.isoformat() if r.ts else None,
+            "price": r.price,
+            "high": r.high,
+            "low": r.low,
+        }
+        for r in rows
+    ]
+
+
+def recent_decision_signals(
+    since_minutes: int = 31, limit: int = 200, now: datetime | None = None
+) -> list[dict]:
+    """Recent decisions for forensics restart recovery: (signal_id, ts, symbol)."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=since_minutes)
+    with session_scope() as session:
+        rows = session.scalars(
+            select(SignalRecord)
+            .where(SignalRecord.ts >= cutoff)
+            .order_by(SignalRecord.ts.desc())
+            .limit(limit)
+        ).all()
+    return [
+        {"signal_id": r.signal_id, "ts": r.ts, "symbol": r.symbol}
+        for r in rows
+        if r.ts is not None
+    ]
+
+
+def rejection_outcomes(
+    limit: int = 200, session: Session | None = None
+) -> list[dict]:
+    """Rejected signals paired with their 30m post snapshot (§67).
+
+    Only rejections with a directional fusion score (|direction_score|
+    >= 0.1) and a captured 30m snapshot qualify; everything else is
+    honestly unresolved. `session` lets the dashboard reuse its own
+    session; otherwise a fresh one is opened.
+    """
+    ctx = session_scope() if session is None else nullcontext(session)
+    with ctx as session:
+        rows = session.scalars(
+            select(SignalRecord)
+            .where(SignalRecord.final_decision == "rejected")
+            .order_by(SignalRecord.ts.desc())
+            .limit(limit)
+        ).all()
+        snap_by_signal: dict[str, PostSnapshot] = {}
+        for r in rows:
+            snap = session.scalars(
+                select(PostSnapshot).where(
+                    PostSnapshot.signal_id == r.signal_id,
+                    PostSnapshot.offset_min == 30,
+                )
+            ).first()
+            if snap is not None:
+                snap_by_signal[r.signal_id] = snap
+    out: list[dict] = []
+    for r in rows:
+        snap = snap_by_signal.get(r.signal_id)
+        if snap is None:
+            continue
+        fusion = r.fusion if isinstance(r.fusion, dict) else {}
+        ds = fusion.get("direction_score")
+        if not isinstance(ds, (int, float)):
+            continue
+        entry_price = (r.market_snapshot or {}).get("price") if isinstance(
+            r.market_snapshot, dict
+        ) else None
+        if not isinstance(entry_price, (int, float)) or entry_price <= 0:
+            continue
+        out.append(
+            {
+                "signal_id": r.signal_id,
+                "symbol": r.symbol,
+                "ts": r.ts.isoformat() if r.ts else None,
+                "direction_score": float(ds),
+                "entry_price": float(entry_price),
+                "future_price": float(snap.price),
+            }
+        )
+    return out
 
 
 def list_proposals(status: str | None = None, symbol: str | None = None, limit: int = 20) -> list[SignalProposal]:

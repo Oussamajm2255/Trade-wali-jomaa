@@ -50,6 +50,7 @@ from trading_agent.execution.mt5 import MT5Broker, MT5Error
 from trading_agent.execution.paper import PaperBroker
 from trading_agent.notify.dedup import RejectionDedup
 from trading_agent.notify.telegram import TelegramNotifier, agent_bias, agent_conviction
+from trading_agent.forensics import SnapshotRegistry, capture_due
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.supervision import supervise_pending
 from trading_agent.schema.types import Rejection, SignalProposal
@@ -109,6 +110,7 @@ def _market_for(settings: Settings, symbol: str, mt5=None):
             mt5=mt5,
             dxy_symbol=settings.mt5_dxy_symbol,
             exchange_ids=settings.paxg_exchanges,
+            prefer_mt5=settings.prefer_mt5_gold_data,
         )
     else:
         market = MarketData(settings.exchange_id)
@@ -1151,6 +1153,11 @@ def cmd_loop(args: argparse.Namespace) -> None:
     last_balance_day: str | None = None
     last_degraded_day: str | None = None
     mt5_source = broker if settings.live_mode else None
+    if mt5_source is None and settings.mt5_data_enabled and settings.mt5_configured:
+        # Data-only bridge (paper mode): broker candles feed the analysis
+        # pipeline while execution stays simulated. The terminal connects
+        # lazily on the first fetch; failures fall back to the public chain.
+        mt5_source = MT5Broker(settings, risk)
     if settings.live_mode:
         try:
             broker.connect()
@@ -1175,6 +1182,19 @@ def cmd_loop(args: argparse.Namespace) -> None:
             "[yellow]Telegram non configuré[/] — les signaux s'affichent ici uniquement. "
             "Configurez TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID dans .env pour les recevoir sur le téléphone."
         )
+
+    # Phase J (§65): post-signal forensic snapshots (1/3/5/10/30 min).
+    # The registry survives restarts by re-registering recent decisions.
+    forensics_registry = SnapshotRegistry()
+    forensics_registry.restore()
+
+    def _register_forensics(signal_id: str, symbol: str) -> None:
+        if not signal_id:
+            return
+        row = actions.get_signal(signal_id)
+        ts = row.ts if row is not None and row.ts else datetime.now(timezone.utc)
+        forensics_registry.register(signal_id, ts, symbol)
+
     while True:
         try:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1218,6 +1238,11 @@ def cmd_loop(args: argparse.Namespace) -> None:
                         )
                         if notifier.enabled:
                             notifier.send_supervision(follow)
+
+                # Phase J (§65): persist the post-signal snapshots owed
+                # this tick (1/3/5/10/30 min after each decision).
+                if settings.forensics_enabled:
+                    capture_due(forensics_registry, symbol, candle)
 
                 halted, reason = risk.is_halted()
                 if halted:
@@ -1294,6 +1319,9 @@ def cmd_loop(args: argparse.Namespace) -> None:
 
                 if isinstance(result, Rejection):
                     console.print(f"[dim]{symbol}: no trade — {result.reason}[/]")
+                    # Phase J (§65): refusals are audited too — register
+                    # the rejection for its own 1/3/5/10/30 min snapshots.
+                    _register_forensics(result.signal_id, symbol)
                     # Compact agent summary so the console log alone
                     # explains the refusal; Telegram carries the full
                     # analysis (biases, reasoning, contributions, gates).
@@ -1334,6 +1362,7 @@ def cmd_loop(args: argparse.Namespace) -> None:
                     continue
                 proposal_id = actions.save_proposal(result)
                 actions.link_signal_proposal(result.signal_id, proposal_id)
+                _register_forensics(result.signal_id, symbol)
                 console.print(
                     f"[bold]{symbol}: new {result.side.value.upper()} proposal "
                     f"(confidence {result.confidence:.2f}) — ID {proposal_id}[/]"
