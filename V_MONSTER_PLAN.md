@@ -463,20 +463,19 @@ claim, gated on sample size and a truly untouched validation set:
   the sample supports the effect, every confidence/win-rate number
   shown to the trader is labeled UNVALIDATED, not presented as
   probability.
-- **Current frontier**: the live bot is at Phase L — backtests can
-  replay the trader's real reaction latency (drift-projected fills,
-  not idealised next-open), and the ablation harness measures what
-  each feature group (SMC / DXY / VWAP / liquidity / speed) actually
-  contributes on a window, with §41-honest verdicts. Still live from
-  earlier phases: Phase K health scoring (kill-switch on CRITICAL
-  streaks, recovery resets health-engaged halts only), Phase J
-  forensics (post-signal snapshots, rejection-quality audit,
-  counterfactual tooling), Phase I supervision (VALID / DO_NOT_CHASE /
-  INVALIDATED / EXPIRED, change-only follow-ups, human-latency EMA)
-  and Phase H confidence tiers (HIGH/MEDIUM/LOW gating + sizing,
-  A+/A/NO TRADE labels). Confidence scores still have no calibration
-  guarantee — that claim now waits on the data-blocked held-out
-  validation run, and on samples passing the §36 power floors.
+- **Current frontier**: all implementation phases (A–L) are
+  DELIVERED — the V-MONSTER spec's 92 sections are covered, the
+  deterministic risk engine is the final authority, and the bot runs
+  human-in-the-loop end to end. The last phase (L) added realistic
+  backtests that replay the trader's real reaction latency
+  (drift-projected fills, not idealised next-open) and the ablation
+  harness measuring what each feature group (SMC / DXY / VWAP /
+  liquidity / speed) actually contributes on a window, with
+  §41-honest verdicts. The one item left open is the held-out final
+  validation (§7): still DATA-BLOCKED, waiting on the locked 12-month
+  XAUUSD window fetched once. Confidence scores have no calibration
+  guarantee until that run and until samples pass the §36 power
+  floors.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
   is marked unavailable in Telegram with the reason — it is never
   presented as institutional gold VWAP.
