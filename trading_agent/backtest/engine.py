@@ -68,10 +68,15 @@ class HistoricalMarket:
         frames: dict[str, pd.DataFrame],
         dxy_frames: pd.DataFrame | None = None,
         gauge_source: str = "DXY dollar index (historical)",
+        volume_basis: str = "unknown",
     ) -> None:
         self.frames = {tf: df for tf, df in frames.items() if df is not None and len(df)}
         self.dxy = dxy_frames
         self.gauge_source = gauge_source
+        # Volume honesty (spec §4): the caller declares the basis of the
+        # supplied frames — "proxy" (PAXG token flow) disables the volume
+        # axes everywhere downstream, exactly like the live fallback chain.
+        self.volume_basis = volume_basis
         self._now: pd.Timestamp | None = None
         self.last_source = "historical"
 
@@ -387,6 +392,7 @@ class BacktestEngine:
         db_url: str | None = None,
         spread_pct: float | None = None,
         warmup: int | None = None,
+        volume_basis: str = "unknown",
     ) -> None:
         self.settings = settings
         self.symbol = symbol
@@ -398,6 +404,7 @@ class BacktestEngine:
         self.dxy_frames = dxy_frames
         self.start = _parse_ts(start) if start else None
         self.end = _parse_ts(end) if end else None
+        self.volume_basis = volume_basis
 
     def run(self) -> BacktestReport:
         tf = self.timeframe
@@ -423,7 +430,9 @@ class BacktestEngine:
         )
         realistic = bool(getattr(settings, "backtest_realistic_execution", False))
         init_engine(self.db_url)
-        market = HistoricalMarket(self.frames, self.dxy_frames)
+        market = HistoricalMarket(
+            self.frames, self.dxy_frames, volume_basis=self.volume_basis
+        )
         risk = RiskEngine(settings)
         broker = BacktestBroker(settings, risk, self.spread_pct)
         orchestrator = Orchestrator(settings, market, risk)

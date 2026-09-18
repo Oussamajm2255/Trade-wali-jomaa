@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     # of ~96 identical messages per day. Rejections always stay in the DB.
     telegram_rejection_alerts: bool = True
     telegram_rejection_repeat_minutes: int = 60
+    # Narrative presentation layer (§38 extension): a human-language
+    # summary on top of the deterministic message, built ONLY from the
+    # stored signal record. Tone is capped by the real confidence score
+    # and the UNVALIDATED calibration is said out loud. Never touches
+    # the decision pipeline — pure presentation.
+    telegram_narrative_enabled: bool = True
 
     # --- Trading sessions (analysis gate) ---
     # Analysis runs only while London or New York is open. Times are LOCAL

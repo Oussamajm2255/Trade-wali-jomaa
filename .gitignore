@@ -5,6 +5,9 @@
 *.db
 *.sqlite3
 
+# Held-out validation cache (fetched once, never retouched)
+_heldout_cache/
+
 # Private / generated artifacts
 conversation.txt
 report.txt

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from trading_agent.analytics.contribution import feature_contribution
 from trading_agent.config import Settings
+from trading_agent.notify.narration import build_narrative
 from trading_agent.schema.types import SignalProposal
 
 logger = logging.getLogger(__name__)
@@ -177,8 +178,15 @@ class TelegramNotifier:
         outputs = record.get("ai_outputs") or {}
         contribution = feature_contribution(record)
 
-        lines = [
-            f"🎯 SIGNAL {proposal.symbol} — {proposal.side.value.upper()}",
+        lines = [f"🎯 SIGNAL {proposal.symbol} — {proposal.side.value.upper()}"]
+        # Narrative presentation layer: a human-language summary of the
+        # deterministic decision, built ONLY from the stored record. The
+        # full technical trace stays below — nothing is deleted.
+        if self.s.telegram_narrative_enabled:
+            narrative = build_narrative(record, side=proposal.side.value.upper())
+            if narrative:
+                lines += ["", narrative, "", "── Détails (audit) ──"]
+        lines += [
             "",
             f"Entrée : {proposal.entry:,.2f}",
             f"Stop : {proposal.stop:,.2f}",
@@ -313,10 +321,14 @@ class TelegramNotifier:
         reason = record.get("decision_reason") or "aucune raison enregistrée"
         code = record.get("no_trade_reason")
         tf = record.get("timeframe")
-        lines = [
-            f"🚫 SIGNAL REJETÉ {record.get('symbol', '?')}" + (f" ({tf})" if tf else ""),
-            f"Raison : {reason}" + (f" ({code})" if code else ""),
-        ]
+        lines = [f"🚫 SIGNAL REJETÉ {record.get('symbol', '?')}" + (f" ({tf})" if tf else "")]
+        # Same narrative layer as proposals: the refusal told as a human
+        # sentence on top, the full technical trace below the separator.
+        if self.s.telegram_narrative_enabled:
+            narrative = build_narrative(record, rejected=True)
+            if narrative:
+                lines += ["", narrative, "", "── Détails (audit) ──"]
+        lines.append(f"Raison : {reason}" + (f" ({code})" if code else ""))
         if note:
             lines.append(note)
         # Phase H (§81): rejections always carry the NO TRADE label.

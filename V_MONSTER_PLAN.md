@@ -399,13 +399,44 @@ push gate. No V2 behaviour changes without a test proving parity.
   `required_trades` (effect size, variance, power -> N per side) and
   `detectable_effect` (the inverse floor); claims below the floor are
   labeled UNVALIDATED, never presented as evidence.
-- Held-out final validation (§7): DATA-BLOCKED — needs the locked
-  12-month XAUUSD window fetched once, at the very end of the phase;
-  marked here, not skipped silently.
+- Held-out final validation (§7): EXECUTED once (one-shot, never
+  re-run) — `analytics/held_out.py` fetches the locked 12-month window
+  (2025-09-17 → 2026-09-17, ending at the Phase C freeze) exactly
+  once, replays the deterministic pipeline over it with the volume
+  axes honestly disabled (`volume_basis="proxy"`, PAXG/USDT chain +
+  real DXY), and computes the calibration curve with the §36
+  per-bucket floors. Verdict is PASS / FAIL / INSUFFICIENT_DATA — the
+  UNVALIDATED labels stay until a clear PASS; see the honesty ledger
+  for the result. Result: **INSUFFICIENT_DATA** — 8 resolved trades
+  over 34,540 candles, every bucket (n ≤ 3) far below the §36 floor
+  of 393; the labels stay UNVALIDATED and the system stays in paper
+  mode.
 - Tests: snapshot toggles on/off (2), reaction-fill scheduling/drift/
   fallback (4), realistic replay delay/deferral/slippage/determinism
   (4), ablation harness structure/end-to-end/verdicts/determinism/
   unknown-group (5), sample size (5).
+
+### Narrative presentation layer (§38 extension) ✅ DELIVERED
+- `notify/narration.py` (new): deterministic French narration built
+  AFTER `fusion/engine.py` and `risk/engine.py`, as a pure function of
+  the stored signal record — it re-tells the already-taken decision,
+  never new data, never a second opinion, never an LLM.
+- Tone is capped by the real score (LOW < 0.55 / MEDIUM / HIGH ≥ 0.75
+  on `raw_confidence`, or the stored statistical tier): a raw 0.12
+  reads as genuine uncertainty. The UNVALIDATED calibration is said
+  out loud whenever `calibrated_confidence` is null. All 21
+  `NoTradeReason` members have a phrase + a re-entry condition; the
+  watch level comes from stored liquidity/VWAP/stop only — nothing
+  hallucinated, and missing data is said plainly.
+- `notify/telegram.py`: narrative on top, then
+  `── Détails (audit) ──`, full technical trace below — nothing
+  deleted, only reorganized. Gated by `telegram_narrative_enabled`
+  (default on). Deliverable doc: `NARRATION_VALIDATION.md` (before/
+  after on 3 real DB records).
+- Tests (22): tone proportionality per tier and per rejection type,
+  reason coverage, no-fabricated-numbers audit, real-data watch level,
+  tick-VWAP labelling, UNVALIDATED hedge, determinism, telegram
+  wiring, disable switch.
 
 ### Deferred slots (data-blocked, honesty-marked)
 - `data/macro.py`, `data/positioning.py`, `data/options.py`,
@@ -433,7 +464,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   beyond Phase I supervision and Phase J snapshot captures (cheap
   registry checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 664 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 702 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -463,19 +494,18 @@ claim, gated on sample size and a truly untouched validation set:
   the sample supports the effect, every confidence/win-rate number
   shown to the trader is labeled UNVALIDATED, not presented as
   probability.
-- **Current frontier**: all implementation phases (A–L) are
-  DELIVERED — the V-MONSTER spec's 92 sections are covered, the
-  deterministic risk engine is the final authority, and the bot runs
-  human-in-the-loop end to end. The last phase (L) added realistic
-  backtests that replay the trader's real reaction latency
-  (drift-projected fills, not idealised next-open) and the ablation
-  harness measuring what each feature group (SMC / DXY / VWAP /
-  liquidity / speed) actually contributes on a window, with
-  §41-honest verdicts. The one item left open is the held-out final
-  validation (§7): still DATA-BLOCKED, waiting on the locked 12-month
-  XAUUSD window fetched once. Confidence scores have no calibration
-  guarantee until that run and until samples pass the §36 power
-  floors.
+- **Current frontier**: all implementation phases (A–L) plus the
+  narrative presentation layer are DELIVERED — the V-MONSTER spec's 92
+  sections are covered, the deterministic risk engine is the final
+  authority, and the bot runs human-in-the-loop end to end. Telegram
+  now reads like a trader's note on top and keeps the full audit trace
+  below (tone ≤ real score, UNVALIDATED said out loud). The held-out
+  final validation (§7) has been EXECUTED once on the locked 12-month
+  window (2025-09-17 → 2026-09-17) — verdict **INSUFFICIENT_DATA**
+  (8 resolved trades, no bucket at the §36 floor of 393), so the
+  UNVALIDATED labels stand and the system continues in paper mode
+  until enough trades resolve. Confidence scores keep no calibration
+  guarantee until a future run passes the §36 power floors.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
   is marked unavailable in Telegram with the reason — it is never
   presented as institutional gold VWAP.
