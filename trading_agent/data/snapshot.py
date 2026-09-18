@@ -295,35 +295,43 @@ def build_market_snapshot(
 
     # Deterministic analysis layer (spec §5/§7): MTF alignment, entry-TF
     # structure. Enrichment — a failure degrades, never kills the cycle.
+    # Feature ablation (§72, Phase L): the SMC toggle removes the
+    # structure map entirely; every consumer answers its documented
+    # neutral on an empty map.
     try:
         snap.alignment = classify_alignment(snap.biases)
-        snap.structure = detect_structure(
-            snap.candles[entry_tf],
-            left=settings.structure_swing_left,
-            right=settings.structure_swing_right,
-            tolerance_pct=settings.structure_tolerance_pct,
-            fvg_min_atr_mult=settings.structure_fvg_min_atr_mult,
-            displacement_atr_mult=settings.structure_displacement_atr_mult,
-            sweep_lookback=settings.structure_sweep_lookback,
-            timeframe=entry_tf,
-        )
+        if settings.feature_smc_enabled:
+            snap.structure = detect_structure(
+                snap.candles[entry_tf],
+                left=settings.structure_swing_left,
+                right=settings.structure_swing_right,
+                tolerance_pct=settings.structure_tolerance_pct,
+                fvg_min_atr_mult=settings.structure_fvg_min_atr_mult,
+                displacement_atr_mult=settings.structure_displacement_atr_mult,
+                sweep_lookback=settings.structure_sweep_lookback,
+                timeframe=entry_tf,
+            )
     except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
         logger.warning("deterministic analysis failed: %s", exc)
         qualities.append(
             DataQuality(state=QualityState.DEGRADED, issues=[f"deterministic analysis failed: {exc}"])
         )
 
-    try:
-        snap.dxy = gauge_callable(market)()
-    except Exception as exc:  # noqa: BLE001 - gauge failure degrades, never kills
-        logger.warning("sentiment gauge fetch failed: %s", exc)
-        snap.dxy = None
+    # Feature ablation (§72): the DXY toggle removes the gauge and the
+    # richer context together — the compatibility filter fails open on
+    # a missing gauge (spec §4) and the DXY agent answers neutrally.
+    if settings.feature_dxy_enabled:
+        try:
+            snap.dxy = gauge_callable(market)()
+        except Exception as exc:  # noqa: BLE001 - gauge failure degrades, never kills
+            logger.warning("sentiment gauge fetch failed: %s", exc)
+            snap.dxy = None
     qualities.append(validate_gauge(snap.dxy, settings.dxy_max_age_hours, now=now))
 
     # Richer DXY context (§9) around the compatibility gauge: level,
     # direction, momentum, trend, volatility from real DXY candles.
     dxy_df = None
-    if hasattr(market, "dxy_ohlcv"):
+    if settings.feature_dxy_enabled and hasattr(market, "dxy_ohlcv"):
         try:
             dxy_df = market.dxy_ohlcv("15m", settings.ohlcv_limit)
         except Exception as exc:  # noqa: BLE001 - falls back to gauge-only
@@ -392,43 +400,48 @@ def build_market_snapshot(
 
     # Phase B (V-MONSTER §9/§12): liquidity map + VWAP, built from the
     # snapshot's own candles — deterministic enrichment, never fatal.
-    try:
-        snap.liquidity = compute_liquidity(
-            snap.candles[entry_tf],
-            snap.gold_context,
-            snap.structure,
-            now=now,
-            daily_df=snap.candles.get("1d"),
-        )
-    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
-        logger.warning("liquidity map failed: %s", exc)
-    try:
-        snap.vwap = compute_vwap(
-            snap.candles[entry_tf],
-            session_start=session_start,
-            trust_volume=trust_volume,
-            volume_basis=volume_basis,
-        )
-    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
-        logger.warning("vwap failed: %s", exc)
+    # Feature ablation (§72): each toggle removes its block entirely;
+    # the room gate and the location component both fail open/neutral.
+    if settings.feature_liquidity_enabled:
+        try:
+            snap.liquidity = compute_liquidity(
+                snap.candles[entry_tf],
+                snap.gold_context,
+                snap.structure,
+                now=now,
+                daily_df=snap.candles.get("1d"),
+            )
+        except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+            logger.warning("liquidity map failed: %s", exc)
+    if settings.feature_vwap_enabled:
+        try:
+            snap.vwap = compute_vwap(
+                snap.candles[entry_tf],
+                session_start=session_start,
+                trust_volume=trust_volume,
+                volume_basis=volume_basis,
+            )
+        except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+            logger.warning("vwap failed: %s", exc)
 
     # Phase D (V-MONSTER §27): market speed from the entry frame,
     # anchored to the cycle time (wall clock live, replay time in
     # backtests) so the formation ratio reflects the real candle.
-    try:
-        snap.speed = compute_market_speed(
-            snap.candles[entry_tf],
-            timeframe=entry_tf,
-            window=settings.speed_window,
-            fast_mult=settings.speed_fast_mult,
-            extreme_mult=settings.speed_extreme_mult,
-            slow_mult=settings.speed_slow_mult,
-            accel_lookback=settings.speed_accel_lookback,
-            accel_extreme_mult=settings.speed_accel_extreme_mult,
-            now=now or snap.timestamp,
-        )
-    except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
-        logger.warning("market speed failed: %s", exc)
+    if settings.feature_speed_enabled:
+        try:
+            snap.speed = compute_market_speed(
+                snap.candles[entry_tf],
+                timeframe=entry_tf,
+                window=settings.speed_window,
+                fast_mult=settings.speed_fast_mult,
+                extreme_mult=settings.speed_extreme_mult,
+                slow_mult=settings.speed_slow_mult,
+                accel_lookback=settings.speed_accel_lookback,
+                accel_extreme_mult=settings.speed_accel_extreme_mult,
+                now=now or snap.timestamp,
+            )
+        except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
+            logger.warning("market speed failed: %s", exc)
 
     snap.data_quality = combine_quality(*qualities)
     logger.info(

@@ -391,6 +391,29 @@ class Settings(BaseSettings):
     backtest_db_url: str = "sqlite:///backtest.db"  # isolated risk/DB state
     backtest_spread_pct: float = 0.0  # round-trip spread (half paid each side)
 
+    # --- Realistic backtest execution (V-MONSTER §69/§70/§72, Phase L) ---
+    # Opt-in fill realism on top of the §24 next-open model: the fill is
+    # delayed by the SAME human reaction window Phase G uses (the
+    # signal's stored timing reaction_s, or user_reaction_seconds +
+    # telegram_latency_s) and priced with the Phase G drift projection
+    # (the signal's stored expected_drift) plus the configured slippage.
+    # The position is managed from the first candle that opens after the
+    # fill. Off keeps the deterministic §24/§25 next-open baseline.
+    backtest_realistic_execution: bool = False
+
+    # --- Feature ablation (V-MONSTER §72, Phase L) ---
+    # Per-group switches consumed by the canonical snapshot: off removes
+    # the group's inputs (empty structure map, no DXY gauge/context, no
+    # VWAP, no liquidity map, no speed state) so the pipeline's honest
+    # neutral paths take over — no data never blocks and every scoring
+    # component falls to its documented neutral value. Used by
+    # analytics/ablation.py for WITH vs WITHOUT runs.
+    feature_smc_enabled: bool = True
+    feature_dxy_enabled: bool = True
+    feature_vwap_enabled: bool = True
+    feature_liquidity_enabled: bool = True
+    feature_speed_enabled: bool = True
+
     @field_validator("symbols", mode="before")
     @classmethod
     def _normalise_symbols(cls, value: object) -> str:

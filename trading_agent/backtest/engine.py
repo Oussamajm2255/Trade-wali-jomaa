@@ -9,6 +9,12 @@ No look-ahead, ever:
   (threaded through quality/snapshot/risk/paper brokers).
 - A signal produced when candle N closes is filled at the OPEN of
   candle N+1 — the first price actually available next.
+- Opt-in realistic execution (§69/§70): the fill is delayed by the
+  same human reaction window Phase G uses and priced with its drift
+  projection, so replays model the trader's latency instead of the
+  idealised next-open fill. The model never peeks forward: the
+  projected price comes from the signal's own stored timing payload
+  (pace at signal time), not from future candles.
 - Historical DXY gauges are recomputed from daily DXY closes known at
   the replay timestamp, with the same formula the live gauge uses.
 
@@ -118,12 +124,27 @@ class BacktestBroker(PaperBroker):
     def _apply_spread(self, price: float, direction: float) -> float:
         return price * (1 + direction * self.spread_pct / 2.0)
 
-    def open_position_at(self, proposal: SignalProposal, market_price: float, opened_at=None) -> Position | None:
-        """Fill an approved proposal at the given next-candle-open price."""
+    def open_position_at(
+        self,
+        proposal: SignalProposal,
+        market_price: float,
+        opened_at=None,
+        *,
+        fill_model: str = "next_open",
+        slippage_pct: float | None = None,
+    ) -> Position | None:
+        """Fill an approved proposal at the engine-supplied price.
+
+        The §24 model supplies the next candle's open; the realistic
+        model supplies the Phase G drift projection and charges the
+        configured slippage on top (spread is charged either way).
+        """
         if proposal.id is None:
             raise ValueError("proposal must be persisted before opening a position")
         direction = 1.0 if proposal.side == Side.LONG else -1.0
         entry = self._apply_spread(float(market_price), direction)
+        if slippage_pct:
+            entry = entry * (1 + direction * slippage_pct)
         with session_scope() as session:
             row = session.get(Proposal, proposal.id)
             if row is None or row.status != "approved":
@@ -157,7 +178,7 @@ class BacktestBroker(PaperBroker):
                         "entry": round(entry, 8),
                         "stop": proposal.stop,
                         "target": proposal.target,
-                        "fill_model": "next_open",
+                        "fill_model": fill_model,
                     },
                 )
             )
@@ -179,6 +200,70 @@ class BacktestBroker(PaperBroker):
                 exit_price = self._apply_spread(exit_price, -direction)
                 events.append(self._close(session, pos, exit_price, reason, now))
         return events
+
+
+@dataclass
+class _PendingFill:
+    """One auto-approved proposal waiting for its fill window."""
+
+    proposal: SignalProposal
+    fill_ts: pd.Timestamp | None  # None = next candle open (§24 model)
+    drift_price: float | None  # Phase G projected entry (realistic model)
+
+
+def reaction_fill(
+    proposal: SignalProposal,
+    signal_ts: pd.Timestamp,
+    timing: dict | None,
+    settings: Settings,
+) -> _PendingFill:
+    """Realistic fill scheduling: Phase G's reaction window + drift.
+
+    The delay is the signal's stored timing `reaction_s` when available
+    (what Phase G assumed at send time); otherwise the configured
+    budget (`user_reaction_seconds` + `telegram_latency_s`). The fill
+    price is the Phase G projection: entry plus the pace-based drift
+    over the reaction window (`pace_per_minute` from the same payload),
+    with the broker's spread and slippage charged on top. Without a
+    timing payload the fill is reaction-delayed only (drift 0.0) —
+    never fabricated, and never peeks at future candles.
+    """
+    payload = timing or {}
+    if isinstance(payload.get("reaction_s"), (int, float)):
+        reaction_s = float(payload["reaction_s"])
+    else:
+        reaction_s = float(
+            getattr(settings, "user_reaction_seconds", 120.0) or 120.0
+        ) + float(getattr(settings, "telegram_latency_s", 3.0) or 3.0)
+    pace = payload.get("pace_per_minute")
+    drift_px = (
+        float(pace) * reaction_s / 60.0 if isinstance(pace, (int, float)) else 0.0
+    )
+    sign = 1.0 if proposal.side == Side.LONG else -1.0
+    return _PendingFill(
+        proposal=proposal,
+        fill_ts=pd.Timestamp(signal_ts) + pd.Timedelta(seconds=reaction_s),
+        drift_price=float(proposal.entry) + sign * drift_px,
+    )
+
+
+def _signal_timing(proposal_id: str) -> dict | None:
+    """The Phase G timing payload stored with the signal, if any.
+
+    Looked up through the proposal link: the decision row carries the
+    proposal id, not the signal id, and the record is linked back to it
+    by `link_signal_proposal` before the approval happens.
+    """
+    try:
+        with session_scope() as session:
+            record = session.scalar(
+                select(SignalRecord).where(SignalRecord.proposal_id == proposal_id)
+            )
+        if record is not None:
+            return (record.fusion or {}).get("timing") or None
+    except Exception:  # noqa: BLE001 - fill scheduling never kills the replay
+        return None
+    return None
 
 
 @dataclass
@@ -281,6 +366,13 @@ class BacktestEngine:
     backtest database; approved proposals are auto-executed at the next
     candle's open (the human-in-the-loop is modelled as "approve
     everything the risk engine approves").
+
+    With `backtest_realistic_execution` the fill is instead scheduled at
+    signal time + the human reaction window (the signal's stored Phase G
+    timing) and priced with the Phase G drift projection plus the
+    configured slippage; the position is managed from the first candle
+    that opens after the fill. Either way the fill never depends on
+    prices the model has not reached yet.
     """
 
     def __init__(
@@ -329,6 +421,7 @@ class BacktestEngine:
         settings = self.settings.model_copy(
             update={"deepseek_api_key": None, "timeframe": tf}
         )
+        realistic = bool(getattr(settings, "backtest_realistic_execution", False))
         init_engine(self.db_url)
         market = HistoricalMarket(self.frames, self.dxy_frames)
         risk = RiskEngine(settings)
@@ -342,7 +435,7 @@ class BacktestEngine:
         equity_curve: list[tuple[str, float]] = [
             (str(entry.index[self.warmup - 1]), start_equity)
         ]
-        pending: list[SignalProposal] = []
+        pending: list[_PendingFill] = []
 
         for i in range(self.warmup, len(entry)):
             ts = entry.index[i]
@@ -350,15 +443,40 @@ class BacktestEngine:
             candle = entry.iloc[i]
             market.set_now(ts)
 
-            # 1. Fills from the previous candle's approvals — at THIS
+            # 1. Fills whose reaction window has elapsed (realistic
+            # model) or plain next-open fills (§24 model) — at THIS
             # candle's open (the first price actually available).
-            for proposal in pending:
-                position = broker.open_position_at(proposal, float(candle["open"]), now)
+            still_pending: list[_PendingFill] = []
+            for item in pending:
+                if item.fill_ts is not None and item.fill_ts > ts:
+                    still_pending.append(item)  # reaction window not over yet
+                    continue
+                if item.fill_ts is not None:
+                    fill_price = (
+                        item.drift_price
+                        if item.drift_price is not None
+                        else float(item.proposal.entry)
+                    )
+                    opened_at = item.fill_ts.to_pydatetime()
+                    fill_model = "realistic_reaction_drift"
+                    slippage_pct = settings.slippage
+                else:
+                    fill_price = float(candle["open"])
+                    opened_at = now
+                    fill_model = "next_open"
+                    slippage_pct = None
+                position = broker.open_position_at(
+                    item.proposal,
+                    fill_price,
+                    opened_at,
+                    fill_model=fill_model,
+                    slippage_pct=slippage_pct,
+                )
                 if position is not None:
                     logger.info(
-                        "backtest fill %s @ %.8g", proposal.signal_id, position.entry
+                        "backtest fill %s @ %.8g", item.proposal.signal_id, position.entry
                     )
-            pending.clear()
+            pending = still_pending
 
             halted_before, _ = risk.is_halted()
 
@@ -390,7 +508,11 @@ class BacktestEngine:
                 proposal_id, approve=True, note="backtest auto-approval"
             )
             if approved is not None:
-                pending.append(approved)
+                if not realistic:
+                    pending.append(_PendingFill(approved, None, None))
+                else:
+                    timing = _signal_timing(proposal_id)
+                    pending.append(reaction_fill(approved, ts, timing, settings))
 
         # Liquidate whatever is still open at the last close, stamped with
         # the replay timestamp (deterministic; never wall clock).

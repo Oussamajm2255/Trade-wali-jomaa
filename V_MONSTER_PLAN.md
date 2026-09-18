@@ -372,12 +372,40 @@ push gate. No V2 behaviour changes without a test proving parity.
   (3), status boundaries (2), monitor engage/recover/manual-halt-
   sacred/streak-reset/interval-gating (5).
 
-### Phase L — Realistic backtesting + feature ablation (§69, §70, §72)
-- `backtest/engine.py`: human reaction delay + telegram latency + drift
-  + slippage model (shared with Phase G).
-- `analytics/ablation.py` (new): WITH vs WITHOUT feature-group harness
-  over the same walk-forward window (SMC, DXY, VWAP, liquidity, speed…).
-- Tests: delay model, ablation runner.
+### Phase L — Realistic backtesting + feature ablation (§69, §70, §72) ✅ DELIVERED
+- `backtest/engine.py`: opt-in realistic execution
+  (`backtest_realistic_execution`): the fill is scheduled at signal
+  time + the SAME human reaction window Phase G assumed (the signal's
+  stored timing `reaction_s`, fallback `user_reaction_seconds` +
+  `telegram_latency_s`) and priced with the Phase G drift projection
+  (pace-based drift from the stored payload) plus the configured
+  `slippage` on top of the broker spread; the position is managed from
+  the first candle that opens after the fill. Reaction windows longer
+  than the timeframe defer the fill across candles — no look-ahead
+  ever: the projection comes from the signal's own payload, never
+  from future candles. Off = the deterministic §24/§25 next-open
+  baseline (the A/B baseline contract is untouched).
+- Feature ablation toggles in the canonical snapshot:
+  `feature_smc/dxy/vwap/liquidity/speed_enabled` — off removes the
+  group's inputs (empty structure map, no DXY gauge/context, no VWAP,
+  no liquidity map, no speed state); every consumer answers its
+  documented neutral, no data never blocks (§4).
+- `analytics/ablation.py` (new): WITH vs WITHOUT harness — the same
+  window replayed per group on isolated databases, verdicts by the
+  §41 rules (IMPROVED = the group cost more than it gave on this
+  window; WORSE = it earned its place; MIXED/INSUFFICIENT_DATA = no
+  conclusion).
+- `analytics/sample_size.py` (new): the §36 sample-size derivation —
+  `required_trades` (effect size, variance, power -> N per side) and
+  `detectable_effect` (the inverse floor); claims below the floor are
+  labeled UNVALIDATED, never presented as evidence.
+- Held-out final validation (§7): DATA-BLOCKED — needs the locked
+  12-month XAUUSD window fetched once, at the very end of the phase;
+  marked here, not skipped silently.
+- Tests: snapshot toggles on/off (2), reaction-fill scheduling/drift/
+  fallback (4), realistic replay delay/deferral/slippage/determinism
+  (4), ablation harness structure/end-to-end/verdicts/determinism/
+  unknown-group (5), sample size (5).
 
 ### Deferred slots (data-blocked, honesty-marked)
 - `data/macro.py`, `data/positioning.py`, `data/options.py`,
@@ -405,7 +433,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   beyond Phase I supervision and Phase J snapshot captures (cheap
   registry checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 644 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 664 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -430,20 +458,25 @@ claim, gated on sample size and a truly untouched validation set:
   parity + no WORSE verdict.
 - **Sample size (§36)**: no fixed "100 trades" rule — the required N
   for any performance claim is derived from effect size, variance and
-  power (Phase L). Until then, every confidence/win-rate number shown
-  to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase K — the loop scores
-  its own vitals (DB / Telegram / AI / provider / tick lag / clock)
-  into one health score; CRITICAL streaks engage the kill-switch
-  (block new signals) and recovery auto-resets health-engaged halts
-  only. Still live from earlier phases: Phase J forensics (post-signal
-  snapshots, rejection-quality audit, counterfactual tooling),
-  Phase I supervision (VALID / DO_NOT_CHASE / INVALIDATED / EXPIRED,
-  change-only follow-ups, human-latency EMA) and Phase H confidence
-  tiers (HIGH/MEDIUM/LOW gating + sizing, A+/A/NO TRADE labels).
-  Its confidence scores have no
-  calibration guarantee yet; Phase L
-  is the first point at which they claim meaning.
+  power (`analytics/sample_size.py`, shipped in Phase L):
+  `required_trades` and the inverse `detectable_effect` floor. Until
+  the sample supports the effect, every confidence/win-rate number
+  shown to the trader is labeled UNVALIDATED, not presented as
+  probability.
+- **Current frontier**: the live bot is at Phase L — backtests can
+  replay the trader's real reaction latency (drift-projected fills,
+  not idealised next-open), and the ablation harness measures what
+  each feature group (SMC / DXY / VWAP / liquidity / speed) actually
+  contributes on a window, with §41-honest verdicts. Still live from
+  earlier phases: Phase K health scoring (kill-switch on CRITICAL
+  streaks, recovery resets health-engaged halts only), Phase J
+  forensics (post-signal snapshots, rejection-quality audit,
+  counterfactual tooling), Phase I supervision (VALID / DO_NOT_CHASE /
+  INVALIDATED / EXPIRED, change-only follow-ups, human-latency EMA)
+  and Phase H confidence tiers (HIGH/MEDIUM/LOW gating + sizing,
+  A+/A/NO TRADE labels). Confidence scores still have no calibration
+  guarantee — that claim now waits on the data-blocked held-out
+  validation run, and on samples passing the §36 power floors.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
   is marked unavailable in Telegram with the reason — it is never
   presented as institutional gold VWAP.
