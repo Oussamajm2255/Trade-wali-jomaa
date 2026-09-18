@@ -137,6 +137,27 @@ def test_full_proposal_carries_every_section(telegram_settings):
     assert "reject pid-9" in text
 
 
+def test_tick_volume_vwap_is_labelled_in_proposal(telegram_settings):
+    """§7 honesty: broker tick-volume VWAP never reads as traded-volume VWAP."""
+    record = _record()
+    record["market_snapshot"]["vwap"] = {
+        "available": True,
+        "session_vwap": 4352.1,
+        "daily_vwap": 4355.0,
+        "state": "above",
+        "volume_basis": "tick",
+    }
+    notifier = TelegramNotifier(telegram_settings)
+    text = notifier.proposal_message(_proposal(), record=record, proposal_id="pid-10")
+    assert "VWAP session : 4,352.10 (volume tick)" in text
+    assert "VWAP jour : 4,355.00" in text
+    # The real-volume VWAP never carries the tick marker.
+    record["market_snapshot"]["vwap"]["volume_basis"] = "real"
+    text = notifier.proposal_message(_proposal(), record=record, proposal_id="pid-11")
+    assert "VWAP session : 4,352.10 (volume tick)" not in text
+    assert "VWAP session : 4,352.10" in text
+
+
 def test_proposal_missing_context_sections_are_omitted(telegram_settings):
     record = _record()
     record["market_snapshot"] = {"last_close": 4350.0, "data_quality": "good"}

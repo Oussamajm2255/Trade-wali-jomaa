@@ -286,10 +286,12 @@ def build_market_snapshot(
         qualities.append(
             DataQuality(state=QualityState.DEGRADED, issues=["provider fallback in use (proxy data)"])
         )
-    # Volume only counts on the primary feed: on proxy data (PAXG token)
-    # volume measures token flow, not gold flow — the shock engine and
-    # the VWAP (Phase B) both respect this flag.
-    trust_volume = "proxy" not in snap.data_source.lower()
+    # Volume honesty (spec §4), driven by the provider's `volume_basis`:
+    # "real" = traded volume (yfinance futures) -> full trust; "tick" =
+    # broker tick volume (MT5) -> shock volume axis on, VWAP labelled
+    # tick; "proxy" = PAXG token flow -> volume ignored everywhere.
+    volume_basis = getattr(market, "volume_basis", "unknown")
+    trust_volume = volume_basis != "proxy"
 
     # Deterministic analysis layer (spec §5/§7): MTF alignment, entry-TF
     # structure. Enrichment — a failure degrades, never kills the cycle.
@@ -405,6 +407,7 @@ def build_market_snapshot(
             snap.candles[entry_tf],
             session_start=session_start,
             trust_volume=trust_volume,
+            volume_basis=volume_basis,
         )
     except Exception as exc:  # noqa: BLE001 - enrichment, never fatal
         logger.warning("vwap failed: %s", exc)

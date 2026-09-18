@@ -88,6 +88,7 @@ def compute_vwap(
     entry_df: pd.DataFrame,
     session_start: datetime | None = None,
     trust_volume: bool = True,
+    volume_basis: str = "real",
 ) -> dict:
     """Session + daily VWAP for one cycle (V-MONSTER §12).
 
@@ -97,6 +98,8 @@ def compute_vwap(
     - `state`: fresh close cross against the session anchor (fallback:
       day anchor) — reclaimed / rejected / above / below.
     - `trend`: slope of the day-window cumulative VWAP.
+    - `volume_basis`: what the weighting volume actually is ("real"
+      traded volume, "tick" broker tick volume, "proxy" token flow).
     """
     if not trust_volume:
         return {
@@ -108,6 +111,7 @@ def compute_vwap(
             "distance_to_session_pct": None,
             "state": None,
             "trend": None,
+            "volume_basis": volume_basis,
         }
     if not _has_volume(entry_df):
         return {
@@ -119,6 +123,7 @@ def compute_vwap(
             "distance_to_session_pct": None,
             "state": None,
             "trend": None,
+            "volume_basis": volume_basis,
         }
 
     price = float(entry_df["close"].iloc[-1])
@@ -151,4 +156,5 @@ def compute_vwap(
         "distance_to_session_pct": _pct(price, session_vwap),
         "state": _cross_state(anchor_window, anchor),
         "trend": _trend(day_window),
+        "volume_basis": volume_basis,
     }

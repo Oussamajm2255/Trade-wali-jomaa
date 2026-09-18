@@ -36,6 +36,13 @@ def _build_fake_mt5(state: dict) -> types.ModuleType:
     fake.TRADE_RETCODE_REQUOTE = RETCODE_REQUOTE
     fake.ORDER_TIME_GTC = 0
     fake.ORDER_FILLING_IOC = 1
+    fake.TIMEFRAME_M1 = 1
+    fake.TIMEFRAME_M5 = 5
+    fake.TIMEFRAME_M15 = 15
+    fake.TIMEFRAME_M30 = 30
+    fake.TIMEFRAME_H1 = 60
+    fake.TIMEFRAME_H4 = 240
+    fake.TIMEFRAME_D1 = 1440
 
     def initialize(**kwargs):
         state["initialized"] = True
@@ -102,6 +109,14 @@ def _build_fake_mt5(state: dict) -> types.ModuleType:
     def history_deals_get(**kwargs):
         return state["deals"].get(kwargs.get("position"), [])
 
+    def copy_rates_from_pos(symbol, timeframe, start_pos, count):
+        state.setdefault("rates", []).append((symbol, timeframe, count))
+        return [
+            {"time": 1720000000 + i * 900, "open": 1.0, "high": 1.1, "low": 0.9,
+             "close": 1.05, "tick_volume": 100, "spread": 1, "real_volume": 0}
+            for i in range(count)
+        ]
+
     def shutdown():
         state["shutdown"] = True
         return True
@@ -117,6 +132,7 @@ def _build_fake_mt5(state: dict) -> types.ModuleType:
     fake.order_send = order_send
     fake.positions_get = positions_get
     fake.history_deals_get = history_deals_get
+    fake.copy_rates_from_pos = copy_rates_from_pos
     fake.shutdown = shutdown
     return fake
 
@@ -132,6 +148,7 @@ def fake_mt5(monkeypatch) -> dict:
         "deals": {},
         "retcodes": [],
         "next_ticket": 100,
+        "rates": [],
     }
     monkeypatch.setitem(sys.modules, "MetaTrader5", _build_fake_mt5(state))
     return state
@@ -156,6 +173,22 @@ def approve_proposal(proposal: SignalProposal) -> SignalProposal:
 
 
 # ------------------------------------------------------------------ sizing
+
+
+def test_fetch_ohlcv_reads_broker_candles(fake_mt5, base_settings):
+    """Data-bridge contract: broker candles in a UTC-indexed OHLCV frame."""
+    broker = MT5Broker(base_settings, RiskEngine(base_settings))
+    df = broker.fetch_ohlcv("XAUUSD", "15m", 300)
+    assert len(df) == 300
+    assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+    assert df.index.tz is not None  # UTC epoch -> aware index
+    assert fake_mt5["rates"][0] == ("XAUUSD", 15, 300)
+
+
+def test_fetch_ohlcv_unsupported_timeframe_raises(fake_mt5, base_settings):
+    broker = MT5Broker(base_settings, RiskEngine(base_settings))
+    with pytest.raises(MT5Error, match="unsupported timeframe"):
+        broker.fetch_ohlcv("XAUUSD", "7m", 10)
 
 
 def test_lots_conversion_from_units(fake_mt5, base_settings):

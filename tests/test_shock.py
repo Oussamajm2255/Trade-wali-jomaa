@@ -249,6 +249,7 @@ class _ProxyMarket:
     """Market whose candles come from a proxy feed with a volume spike."""
 
     last_source = "PAXG/USDT proxy (yfinance unavailable)"
+    volume_basis = "proxy"  # token flow, not gold flow (GoldData parity)
 
     def __init__(self) -> None:
         self.calendar_provider = None

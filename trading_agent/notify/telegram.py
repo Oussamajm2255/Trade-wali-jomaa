@@ -416,8 +416,11 @@ class TelegramNotifier:
         vwap = snap.get("vwap") or {}
         if vwap.get("available"):
             parts = []
+            # Honesty (§7): tick-volume VWAP is never presented as traded
+            # volume VWAP — the broker basis is labelled on the anchor.
+            marker = " (volume tick)" if vwap.get("volume_basis") == "tick" else ""
             if vwap.get("session_vwap") is not None:
-                parts.append(f"VWAP session : {float(vwap['session_vwap']):,.2f}")
+                parts.append(f"VWAP session : {float(vwap['session_vwap']):,.2f}{marker}")
             if vwap.get("daily_vwap") is not None:
                 parts.append(f"VWAP jour : {float(vwap['daily_vwap']):,.2f}")
             state = vwap.get("state")

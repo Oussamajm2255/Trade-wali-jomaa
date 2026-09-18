@@ -42,14 +42,26 @@ class GoldData:
         mt5: Any = None,
         dxy_symbol: str = "DXY_U6",
         exchange_ids: list[str] | None = None,
+        prefer_mt5: bool = True,
+        mt5_cooldown_s: float = 300.0,
     ) -> None:
         self.exchange_id = exchange_id
         # PAXG fallback tries these exchanges in order until one answers
         # (e.g. Binance blocks US datacenter IPs — Railway — so Kraken
         # takes over automatically).
         self.exchange_ids = exchange_ids or [exchange_id]
-        self.mt5 = mt5  # optional MT5 broker for broker-native DXY candles
+        self.mt5 = mt5  # optional MT5 broker for broker-native candles/ticks
         self.dxy_symbol = dxy_symbol
+        # MT5-first gold candles (broker-native prices, spread, tick
+        # volume); a failed fetch cools MT5 down so a dead terminal is
+        # not hammered every tick, and the public chain takes over.
+        self.prefer_mt5 = prefer_mt5
+        self.mt5_cooldown_s = mt5_cooldown_s
+        self._mt5_disabled_until = 0.0
+        # Volume honesty (spec §4): "real" = traded volume (futures),
+        # "tick" = broker tick volume (shock OK, VWAP labelled),
+        # "proxy" = PAXG token flow (volume ignored), "unknown" = none.
+        self.volume_basis: str = "unknown"
         self._cache: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
         self._lock = threading.Lock()
         self._ccxt_client = None
@@ -94,6 +106,26 @@ class GoldData:
         if len(df) and now - df.index[-1] < pd.Timedelta(_CANDLE_DURATION[timeframe]):
             return df.iloc[:-1]
         return df
+
+    # ------------------------------------------------------------ MT5 bridge
+
+    def _mt5_fetch(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+        """Broker-native gold candles from the connected terminal.
+
+        One extra bar is requested so dropping the in-progress candle
+        still leaves `limit` closed bars (keeps the cache contract — a
+        frame shorter than `limit` would never be served from cache and
+        the terminal would be re-read every tick).
+        """
+        df = self.mt5.fetch_ohlcv(symbol, timeframe, limit + 1)
+        if df is None or df.empty:
+            raise GoldDataError("MT5 returned no candles")
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df = self._drop_open_candle(df, timeframe)
+        if df.empty:
+            raise GoldDataError("MT5 returned no closed candles")
+        return df.tail(limit)
 
     # ------------------------------------------------------------ PAXG fallback
 
@@ -150,19 +182,35 @@ class GoldData:
             if cached and now - cached[0] < ttl and len(cached[1]) >= limit:
                 return cached[1].copy()
         source = f"yfinance:{GOLD_YF_TICKER}"
-        try:
-            df = self._yf_fetch(timeframe, limit)
-            age = pd.Timestamp.now(tz="UTC") - df.index[-1]
-            if age > pd.Timedelta(STALENESS_LIMIT):
-                # Futures market closed (weekend/holiday): prefer live PAXG.
-                try:
-                    df = self._paxg_fetch(timeframe, limit)
-                    source = f"{PAXG_SYMBOL} proxy (futures closed)"
-                except GoldDataError as exc:
-                    logger.warning("PAXG fallback failed, keeping futures data: %s", exc)
-        except GoldDataError:
-            df = self._paxg_fetch(timeframe, limit)
-            source = f"{PAXG_SYMBOL} proxy (yfinance unavailable)"
+        df: pd.DataFrame | None = None
+        # Broker terminal first: real XAUUSD prices, spread and tick
+        # volume from the trader's own feed. Any failure cools MT5 down
+        # (no per-tick hammering) and the public chain takes over.
+        if self.mt5 is not None and self.prefer_mt5 and time.time() >= self._mt5_disabled_until:
+            try:
+                df = self._mt5_fetch(symbol, timeframe, limit)
+                source = f"MT5 broker:{symbol}"
+                self.volume_basis = "tick"
+            except Exception as exc:  # noqa: BLE001 - any MT5 failure degrades
+                logger.warning("MT5 gold candles failed, falling back to public chain: %s", exc)
+                self._mt5_disabled_until = time.time() + self.mt5_cooldown_s
+        if df is None:
+            try:
+                df = self._yf_fetch(timeframe, limit)
+                self.volume_basis = "real"
+                age = pd.Timestamp.now(tz="UTC") - df.index[-1]
+                if age > pd.Timedelta(STALENESS_LIMIT):
+                    # Futures market closed (weekend/holiday): prefer live PAXG.
+                    try:
+                        df = self._paxg_fetch(timeframe, limit)
+                        source = f"{PAXG_SYMBOL} proxy (futures closed)"
+                        self.volume_basis = "proxy"
+                    except GoldDataError as exc:
+                        logger.warning("PAXG fallback failed, keeping futures data: %s", exc)
+            except GoldDataError:
+                df = self._paxg_fetch(timeframe, limit)
+                source = f"{PAXG_SYMBOL} proxy (yfinance unavailable)"
+                self.volume_basis = "proxy"
         with self._lock:
             self._cache[key] = (now, df.copy())
         self.last_source = source

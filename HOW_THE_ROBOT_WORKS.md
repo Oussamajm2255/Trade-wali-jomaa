@@ -39,7 +39,7 @@ or fail) is stored with the full trail of gates, so you can always see
 
 | Data | Source | Notes |
 |---|---|---|
-| XAUUSD 15m candles | yfinance gold futures → PAXG/USD fallback (24/7) | Last 300 candles |
+| XAUUSD 15m candles | **MT5 broker (XAUUSD) first** → yfinance gold futures → PAXG/USD fallback (24/7) | Last 300 candles; broker-native prices/spread when the terminal is connected |
 | XAUUSD 4h candles | same sources | For the trend bias |
 | DXY gauge (0–100) | MT5 `DXY_U6` → yfinance `DX-Y.NYB` fallback | 100 = weak dollar = bullish gold |
 | Indicator snapshot | computed locally (pandas) | EMA 20/50/200, RSI, MACD, ATR, ADX, Bollinger, volume |
@@ -318,6 +318,17 @@ signal record; it doesn't block.
   computed locally and used by setup quality + the no-trade gate.
 - ❌ No multi-symbol confirmation (e.g., GBPUSD) yet
 - ⚠️ Weekends: DXY gauge frozen at Friday's close
+- ✅ **Broker data bridge**: when the MT5 terminal is connected (live
+  mode, or paper mode with `MT5_DATA_ENABLED=true`), XAUUSD candles
+  come from the broker first — real prices, real spread, real tick
+  activity. The public chain (yfinance → PAXG) is the automatic
+  fallback; a dead terminal is skipped for 5 minutes instead of being
+  hammered every tick. `PREFER_MT5_GOLD_DATA=false` forces the public
+  chain even when connected.
+- ⚠️ **Tick-volume honesty**: broker VWAP is weighted by the broker's
+  tick volume, not traded volume — the Telegram line is labelled
+  "(volume tick)" and is never presented as institutional gold VWAP.
+  On proxy volume (PAXG token flow) VWAP stays unavailable.
 - ⚠️ Degraded mode: if DeepSeek is unreachable, heuristics take over
   (you are alerted — treat those signals with extra caution)
 - ⚠️ Statistical quality needs history: with an unknown sample the gate
@@ -354,7 +365,6 @@ signal record; it doesn't block.
    are stored for you; you only need to review them.
 9. **Planned upgrades that will raise accuracy further:**
    - Session-overlap weighting (prefer 13:30–16:30 UTC signals)
-   - DXY from MT5 in real time (Windows machine)
    - Multi-symbol confirmation
 
 ---

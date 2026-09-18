@@ -29,6 +29,19 @@ def test_vwap_is_typical_price_volume_mean() -> None:
     assert out["distance_to_daily_pct"] == pytest.approx(6.538, abs=0.001)
 
 
+def test_volume_basis_labelled_per_source() -> None:
+    """Tick-volume VWAP (MT5) is available but labelled, never silent."""
+    df = flat_df([100.0, 101.0, 102.0, 110.0])
+    tick = compute_vwap(df, volume_basis="tick")
+    assert tick["available"] is True
+    assert tick["volume_basis"] == "tick"
+    real = compute_vwap(df)
+    assert real["volume_basis"] == "real"
+    proxy = compute_vwap(df, trust_volume=False, volume_basis="proxy")
+    assert proxy["available"] is False
+    assert proxy["volume_basis"] == "proxy"
+
+
 def test_reclaim_when_close_crosses_above_anchor() -> None:
     df = flat_df([100.0, 100.0, 100.0, 110.0])  # vwap 102.5, last close 110
     out = compute_vwap(df)

@@ -44,12 +44,18 @@ class FakeMarket:
         bad_entry: bool = False,
         source: str = "yfinance:GC=F",
         dxy_df: pd.DataFrame | None = None,
+        volume_basis: str | None = None,
     ) -> None:
         self.gauge = gauge
         self.fail_tfs = set(fail_tfs)
         self.bad_entry = bad_entry
         self.last_source = source
         self.dxy_df = dxy_df
+        # Volume honesty as the real providers expose it: "real" = traded
+        # volume, "tick" = broker tick volume, "proxy" = token flow.
+        self.volume_basis = volume_basis if volume_basis is not None else (
+            "proxy" if "proxy" in source.lower() else "real"
+        )
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
         if timeframe in self.fail_tfs:
@@ -173,6 +179,21 @@ def test_proxy_source_marks_vwap_unavailable() -> None:
     assert snap.vwap["daily_vwap"] is None
     # Liquidity levels stay honest on proxy data too.
     assert snap.liquidity["price"] == snap.price
+
+
+def test_mt5_source_vwap_available_labelled_tick() -> None:
+    """Broker-native candles: tick-volume VWAP is available but labelled."""
+    snap = build_market_snapshot(
+        FakeMarket(gauge=fresh_gauge(), source="MT5 broker:XAUUSD", volume_basis="tick"),
+        "XAUUSD",
+        make_settings(),
+        "15m",
+    )
+    assert snap.vwap["available"] is True
+    assert snap.vwap["volume_basis"] == "tick"
+    assert snap.vwap["daily_vwap"] is not None
+    # No proxy label -> the cycle is not degraded by the source choice.
+    assert snap.quality_state == QualityState.PASS
 
 
 def test_snapshot_with_intraday_dxy_candles() -> None:
