@@ -82,6 +82,9 @@ class TelegramNotifier:
         # Phase A (V-MONSTER §5): last send round-trip in ms (0 = never
         # sent) — logged per cycle and available for health checks.
         self.last_latency_ms = 0.0
+        # Phase K (§76): delivery counters for the health score.
+        self.sends = 0
+        self.failures = 0
 
     @property
     def enabled(self) -> bool:
@@ -99,9 +102,12 @@ class TelegramNotifier:
             resp = httpx.post(url, json={"chat_id": self.s.telegram_chat_id, "text": text}, timeout=10)
             resp.raise_for_status()
             self.last_latency_ms = (time.monotonic() - start) * 1000
+            self.sends += 1
             return True
         except Exception as exc:  # noqa: BLE001 - network failures are non-fatal
             self.last_latency_ms = (time.monotonic() - start) * 1000
+            self.sends += 1
+            self.failures += 1
             logger.warning("telegram send failed: %s", exc)
             return False
 

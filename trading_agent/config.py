@@ -297,6 +297,21 @@ class Settings(BaseSettings):
     forensics_enabled: bool = True
     rejection_move_threshold_pct: float = 0.05  # % move for WRONG_REJECT
 
+    # --- System health + auto-protection (V-MONSTER §76/§77/§78, Phase K) ---
+    # The loop scores its own vitals (DB, Telegram delivery, AI
+    # availability, provider quality, tick lag, clock skew) 0-100.
+    # CRITICAL for `health_block_consecutive` evaluations engages the
+    # kill-switch route (new signals blocked); recovery auto-resets
+    # ONLY the halts this monitor engaged — a manual halt is sacred.
+    health_eval_interval_s: float = 60.0  # score refresh cadence
+    health_ok_score: float = 80.0  # >= -> HEALTHY
+    health_block_score: float = 50.0  # < -> CRITICAL (between = DEGRADED)
+    health_block_consecutive: int = 2  # CRITICAL evaluations before halt
+    health_recover_consecutive: int = 3  # HEALTHY evaluations before auto-reset
+    health_auto_recover: bool = True
+    health_telegram_latency_max_ms: float = 5000.0  # above -> unhealthy channel
+    health_tick_lag_ok_ratio: float = 0.8  # processing vs tick interval
+
     # --- Conflict detection (spec §19) ---
     # Contradictions between the fused direction and the deterministic
     # context axes. N >= conflict_conflicted_min conflicts -> CONFLICTED.

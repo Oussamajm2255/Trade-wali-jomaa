@@ -348,11 +348,29 @@ push gate. No V2 behaviour changes without a test proving parity.
   idempotent persistence (16), counterfactual interpolation/gaps/RR
   (10), rejection classification/aggregation/dashboard pipeline (13).
 
-### Phase K — System health + clock + auto-protection (§76, §77, §78)
-- `ops/health.py` (new): DB health, Telegram delivery success rate,
-  AI latency, provider status, queue/tick lag, clock offset; health
-  score; BLOCK NEW SIGNALS on health failure (kill-switch route).
-- Tests: health score thresholds, auto-block.
+### Phase K — System health + clock + auto-protection (§76, §77, §78) ✅ DELIVERED
+- `ops/health.py` (new): six vitals — DB reachability (a real
+  round-trip), Telegram delivery rate + last latency, AI availability
+  (real answers vs heuristic fallbacks), provider data-quality,
+  queue/tick lag (processing vs tick interval), and clock offset
+  (Phase A skew flag) — fused into one 0-100 score with renormalized
+  weights: checks that do not apply (Telegram disabled, no engine, no
+  cycle yet) are EXCLUDED, and an empty score is 100 (blocking on a
+  vacuum would be dishonest, spec §4).
+- Status bands: >= `health_ok_score` HEALTHY, < `health_block_score`
+  CRITICAL, between = DEGRADED. A CRITICAL streak of
+  `health_block_consecutive` evaluations engages the kill-switch route
+  (`RiskEngine.halt` → new signals blocked, audit + Telegram alert); a
+  HEALTHY streak of `health_recover_consecutive` auto-resets ONLY the
+  halts this monitor engaged — a manual halt is never touched.
+- The loop observes every tick (evaluated at `health_eval_interval_s`,
+  startup baseline immediately) and prints the score with a colour
+  tone; Telegram alerts fire on engage/recover only.
+- `TelegramNotifier` gains delivery counters (`sends`/`failures`) for
+  the health score.
+- Tests: six checks (12), weighted score + renormalization + empty
+  (3), status boundaries (2), monitor engage/recover/manual-halt-
+  sacred/streak-reset/interval-gating (5).
 
 ### Phase L — Realistic backtesting + feature ablation (§69, §70, §72)
 - `backtest/engine.py`: human reaction delay + telegram latency + drift
@@ -387,7 +405,7 @@ push gate. No V2 behaviour changes without a test proving parity.
   beyond Phase I supervision and Phase J snapshot captures (cheap
   registry checks).
 - Data honesty: phases using proxy data must respect `trust_volume`.
-- Regression: 622 tests + A/B `ab-compare` gate on any scoring change
+- Regression: 644 tests + A/B `ab-compare` gate on any scoring change
   (see §7 for what IMPROVED means and when it can fire).
 
 ## 7. Evaluation honesty protocol (added after external review)
@@ -414,20 +432,18 @@ claim, gated on sample size and a truly untouched validation set:
   for any performance claim is derived from effect size, variance and
   power (Phase L). Until then, every confidence/win-rate number shown
   to the trader is labeled UNVALIDATED, not presented as probability.
-- **Current frontier**: the live bot is at Phase J — every decision
-  (proposal or rejection) now receives post-signal snapshots at
-  1/3/5/10/30 minutes, rejected setups are audited against their
-  realized 30m move (correct/wrong/inconclusive ratio in a new
-  dashboard section), and the counterfactual M1 entry tooling
-  (`analytics/counterfactual.py`) is ready for timing research.
-  Still live from earlier phases: Phase I supervision (VALID /
-  DO_NOT_CHASE / INVALIDATED / EXPIRED with change-only Telegram
-  follow-ups, human-latency EMA feeding the timing model) and
-  Phase H confidence tiers (HIGH/MEDIUM/LOW gating + sizing, A+/A/
-  NO TRADE labels).
+- **Current frontier**: the live bot is at Phase K — the loop scores
+  its own vitals (DB / Telegram / AI / provider / tick lag / clock)
+  into one health score; CRITICAL streaks engage the kill-switch
+  (block new signals) and recovery auto-resets health-engaged halts
+  only. Still live from earlier phases: Phase J forensics (post-signal
+  snapshots, rejection-quality audit, counterfactual tooling),
+  Phase I supervision (VALID / DO_NOT_CHASE / INVALIDATED / EXPIRED,
+  change-only follow-ups, human-latency EMA) and Phase H confidence
+  tiers (HIGH/MEDIUM/LOW gating + sizing, A+/A/NO TRADE labels).
   Its confidence scores have no
-  calibration guarantee yet; Phases K/L
-  are the first point at which scores claim meaning.
+  calibration guarantee yet; Phase L
+  is the first point at which they claim meaning.
 - **Proxy VWAP honesty**: on proxy volume (PAXG token flow) the VWAP
   is marked unavailable in Telegram with the reason — it is never
   presented as institutional gold VWAP.

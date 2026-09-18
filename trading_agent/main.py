@@ -51,6 +51,7 @@ from trading_agent.execution.paper import PaperBroker
 from trading_agent.notify.dedup import RejectionDedup
 from trading_agent.notify.telegram import TelegramNotifier, agent_bias, agent_conviction
 from trading_agent.forensics import SnapshotRegistry, capture_due
+from trading_agent.ops.health import HealthMonitor
 from trading_agent.risk.engine import RiskEngine
 from trading_agent.supervision import supervise_pending
 from trading_agent.schema.types import Rejection, SignalProposal
@@ -1195,6 +1196,11 @@ def cmd_loop(args: argparse.Namespace) -> None:
         ts = row.ts if row is not None and row.ts else datetime.now(timezone.utc)
         forensics_registry.register(signal_id, ts, symbol)
 
+    # Phase K (§76/§77/§78): system-health monitor — CRITICAL streaks
+    # engage the kill-switch; recovery auto-resets health halts only.
+    health_monitor = HealthMonitor(settings, risk, notifier)
+    health_last: dict[str, dict] = {}  # symbol -> last cycle vitals
+
     while True:
         try:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1243,6 +1249,25 @@ def cmd_loop(args: argparse.Namespace) -> None:
                 # this tick (1/3/5/10/30 min after each decision).
                 if settings.forensics_enabled:
                     capture_due(forensics_registry, symbol, candle)
+
+                # Phase K (§76): health score from the loop's own vitals.
+                # Runs here (before the halt gate) so a health-engaged
+                # halt can auto-recover when the vitals come back.
+                last_vitals = health_last.get(symbol) or {}
+                report = health_monitor.observe(
+                    verdicts=last_vitals.get("verdicts"),
+                    snapshot=last_vitals.get("snapshot"),
+                    processing_ms=last_vitals.get("processing_ms") or 0.0,
+                    interval_s=args.interval,
+                )
+                if report is not None:
+                    tone = {"HEALTHY": "green", "DEGRADED": "yellow", "CRITICAL": "red"}[report.status.value]
+                    console.print(
+                        f"[dim][{tone}]health {report.score:.0f}/100 {report.status.value}[/][/dim]"
+                    )
+                    event = health_monitor.take_event()
+                    if event and notifier.enabled:
+                        notifier.send_alert(event)
 
                 halted, reason = risk.is_halted()
                 if halted:
@@ -1296,6 +1321,13 @@ def cmd_loop(args: argparse.Namespace) -> None:
                 t_cycle = time.monotonic()
                 result, verdicts, snapshot, gauge = orchestrator.run_full(symbol, timeframe)
                 processing_ms = (time.monotonic() - t_cycle) * 1000
+                # Phase K (§76): keep the freshest vitals for the health
+                # monitor (it also reads them while the bot is halted).
+                health_last[symbol] = {
+                    "verdicts": verdicts,
+                    "snapshot": snapshot,
+                    "processing_ms": processing_ms,
+                }
                 # Phase A latency line (V-MONSTER §5): data acquisition,
                 # pipeline and Telegram round-trip per cycle.
                 console.print(
